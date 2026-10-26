@@ -32,7 +32,8 @@ use. Run CLI-only commands yourself when you have shell access; otherwise give t
    format comes back `class: "input"` with that format, and nothing was sent: fix the arg.
 3. Check `ok` before using `data`, and check the output's identity/range against the task. Treat a
    `truncated` result as partial. `tier` shows which transport answered. `healed: true` means the template was
-   repaired and saved during this call. You don't need to do anything about it.
+   repaired and saved during this call. You don't need to do anything about it, unless it also
+   carries `share`: then the site was one someone shared, and the fix can go back (see Sharing).
 4. No results look like this:
    - `ok: true` with `data: []` when the page shows it's empty: a JSON op's list at the extract
      path is empty, an `--embedded` op's extract resolves to `[]`, or an `--html` op whose items
@@ -312,14 +313,27 @@ just did. After `verify <site>` passes for a site the user learned, its `next` s
 ask the user in one line ("Share <site> so other agents can use it? I'll show you exactly what
 becomes public first."). Publishing is the user's decision, every time:
 
-1. `api-anything publish <site>` (add `--keep-examples` only if the examples are public and
-   harmless) only previews. It refuses while an op is `unproven`, has checks `verify` has not run on
-   its current version, or has a failing check; the pull request shows what `verify` answered. Show the user the `files` it lists, every `warnings` item, every
-   `personal` item (an email, an account id, a literal typed into the page: what may be theirs), and
-   that the pull request is public under their GitHub account.
+1. `api-anything publish <site>` only previews. It refuses while an op is `unproven`, has checks
+   `verify` has not run on its current version, or has a failing check; the pull request shows what
+   `verify` answered. Show the user the `files` it lists, every `warnings` item, every `personal`
+   item (an email, an account id, a literal typed into the page, each param example kept: what may be
+   theirs), for an update its `changes` against the registry's copy, and that the pull request is
+   public under their GitHub account. It keeps the param examples of ops learned signed out, so others
+   can verify the spec: if the user says one is theirs, preview again with `--strip-examples`. Add
+   `--keep-examples` (examples of ops learned signed in too) only if the user confirms those are
+   public and harmless.
 2. Only on their explicit OK, run the same command with `--yes`. It needs the GitHub CLI signed in
    (`gh auth login`). It sends exactly the previewed files; if the spec changed since, it refuses
    and you preview again.
 3. Report the pull request URL. It is reviewed before anyone can pull it.
 
-`api-anything export <site> --out site.json` writes the same copy to a file without sending it.
+**Offer a fix back.** When a `call`, `heal` or `verify` result carries `share`, you just repaired a
+site someone else shared, and the registry's copy is still broken for everyone who pulled it. Ask
+the user in one line ("<site> had drifted and I fixed it here. Send the fix back to the registry? I'll
+show you exactly what becomes public first."). If they agree, follow the steps above: the preview's
+`changes` says it is a heal of the registry's current copy, and `--yes` opens an update pull request.
+Over MCP you cannot publish: pass on the command in `share` for the user to run. Never publish
+without their OK.
+
+`api-anything export <site> --out site.json` writes a copy to a file without sending it (examples
+stripped unless `--keep-examples`).

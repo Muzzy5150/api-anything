@@ -589,7 +589,9 @@ Heal strategies, cheapest first:
   learned `session:` refs are stored before the check.
 
 A healed template is saved to the user's spec dir only after validation. Every heal is
-appended to `~/.api-anything/heals.jsonl` (op, strategy, diff summary). A tier an op escalated to
+appended to `~/.api-anything/heals.jsonl` (op, strategy, diff summary). A heal of a spec someone
+shared (one carrying `shared`) fixes it on this machine only, so the result says
+`share: "api-anything publish <site>"` (see Sharing specs). A tier an op escalated to
 (above its own `minTier`) is remembered per op as a speed hint (a lower `--max-tier` still tries
 its own tier), and a call that ran above tier 1 says why in `reason`. Every failure also carries
 `retry` and `nextCall`, filled in one place from the class, the attempt (a busy profile is
@@ -723,7 +725,8 @@ Resolution order: `~/.api-anything/sites/<site>.json` (user-created and healed c
 pulled `~/.api-anything/registry/<site>.json` → the bundled `sites/<site>.json` (community). A heal
 of a pulled or bundled spec writes a user copy.
 `api-anything export <site>` writes a shareable copy. It strips examples (unless `--keep-examples`:
-a human confirmed they are public, so `verify` works for others) and samples (response shapes,
+a human confirmed they are public, so `verify` works for others; `publish` keeps some by default,
+see Sharing specs) and samples (response shapes,
 whose keys can be user data; typed example values in the request become null), and it runs an
 exact-match secret scan against live jar/session values, found under any encoding the spec may
 carry them in (percent-encoded up to three layers, JSON- or `\u`-escaped, base64), plus regex
@@ -846,22 +849,36 @@ shadows the pulled one. Output: each op (`name(params) -> fields`, method, hosts
 warnings, and what changed since the last pull. A call or `ops` for a site that does not exist says
 `next: api-anything pull <site>` before suggesting `capture`.
 
-**Publish.** `api-anything publish <site>` builds the export (examples, shapes, `learnedAt` and
-`shared` stripped; examples kept with `--keep-examples`) and refuses on any live secret, with no
+**Publish.** `api-anything publish <site>` builds the export (shapes, `learnedAt` and `shared`
+stripped) and refuses on any live secret, with no
 `--force`: the export's scan, plus a second exact scan of the spec and the notes against this
 machine's cookies and session values that no `public` name waives (a public name keeps a shared
 bearer out of the shape heuristics, never out of this), run over the exact bytes of the outgoing
 files so a key is read as well as a value; and it refuses a spec over pull's 256 KB. It runs `vetShared`, and lists what may be
 the publisher's own for them alone, never in the pull request: an email address, a UUID or a
 literal IP anywhere in the spec (keys included) or the notes, a run of 5+ digits in a URL path no param
-fills, a literal typed by a `fill` step, a param default. Without `--yes` it stops after the preview:
-the exact files written to `~/.api-anything/outbox/`, what was stripped, every warning, and that the
-pull request is public under the user's GitHub account. `--yes` makes the plan again and sends it
+fills, a literal typed by a `fill` step, a param default, a param example kept. Param examples are
+what `verify`, or anything else testing a shared spec, calls it with, so publish keeps those of ops
+learned signed out (`learnedLoggedIn: false`), each one listed there for the publisher to confirm is
+public (`$.operations[2] param q keeps its example "piranesi": public?`), and strips those of ops
+learned signed in, which are likelier to be the publisher's own; `--keep-examples` keeps those too,
+`--strip-examples` strips every one. `export` keeps its own default (none unless `--keep-examples`).
+
+A site the registry already has is an update: publish fetches the registry's current copy the way
+pull does and names what changed against it: ops added, removed and changed, and for a changed op
+which parts (request host, request URL, request headers or body, slots, volatile tokens, response
+recipe, trigger, match, params, param examples, checks). When the spec was pulled as exactly that copy
+(`shared.sha256` is its hash) the change is a heal of the current version; pulled as an older one,
+it says a change may undo one made since. Without `--yes` it stops after the preview:
+the exact files written to `~/.api-anything/outbox/`, what was stripped, every warning, what changed
+against the registry, and that the pull request is public under the user's GitHub account. `--yes` makes the plan again and sends it
 only if it hashes to the preview's, so what the human approved is what is sent. Sending is the
 GitHub REST API through the GitHub CLI (`gh api`, `API_ANYTHING_GH` overrides the binary): fork the
 registry, sync the fork, create a branch `share/<site>-<hash>` from the registry's main, put each
-file with the account's noreply address as author and committer (not the user's git email), and
-open the pull request with the ops and warnings as its body. Nothing is cloned, so no hook, filter
+file with the account's noreply address as author and committer (not the user's git email; a file
+the branch already has is replaced by its blob `sha`, which the contents API requires), and
+open the pull request, titled `Add sites/<site>.json` or `Update sites/<site>.json`, with the ops,
+what changed against the registry and the warnings as its body. Nothing is cloned, so no hook, filter
 or symlink of a repository runs; every call has fixed arguments with its body as JSON on stdin; what
 `gh` answers is checked against the shape expected before it is used in a path. A second run with
 the same content reuses the branch and reports the open pull request. A failure after a file
@@ -887,10 +904,19 @@ failed: every counted case must pass, with no percentage bar, because there are 
 human-confirmed cases, not a suite in which one wrong case should be outvoted. Inconclusive cases
 count neither way. The pull request carries the record as a table (case, args of checks, expect,
 outcome), never a failure's reason, which may quote the publisher's pages, nor the example's
-args, which export strips. An op with neither examples nor checks is shown as not verified, and
+args (the spec carries the example itself only where publish keeps it). An op with neither examples nor checks is shown as not verified, and
 does not block. Check args are literals the publisher typed, shared with the spec: the personal
 scan lists every check's args for the publisher to confirm, and an `enum` value holding a run of 5+
 digits (an account's id rather than one of the site's options).
+
+**Heals go back.** A pulled spec that drifts is broken for everyone who pulled it, and each heal
+repairs it on one machine only. So a successful heal of a spec carrying `shared` says so: a `call`
+or `heal` result carries `share: "api-anything publish <site>"` (an optional field), `verify` and
+`heal` add a `next` saying the registry's copy is still broken for everyone else and this fix can go
+back, and MCP `call_operation`'s `share` asks the agent to have the user run the command, since MCP
+cannot publish. The agent offers it in one line; publishing stays the user's decision and goes
+through the same preview. A heal of the user's own spec says nothing of the kind, and neither does
+one of a bundled spec: it carries no `shared`.
 
 **Search.** `api-anything search <words | domain | url>` and MCP `find_sites` read the registry's
 index: `index.json`, which CI builds from `sites/` on every push to main (`scripts/pages.ts`, the

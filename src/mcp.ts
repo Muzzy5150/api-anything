@@ -100,6 +100,10 @@ export function asTable(data: unknown): unknown {
   return JSON.stringify(table).length < sourceSize ? table : data;
 }
 
+/** A result's `share` over MCP, which cannot publish: publishing is the user's, in their terminal. */
+export const mcpShare = (command: string) =>
+  `this call repaired a site someone shared, and the registry's copy is still broken for everyone else: ask the user whether to send the fix back, and if they want to, to run in a terminal: ${command} (it previews exactly what becomes public and sends nothing)`;
+
 /**
  * A site an agent pulled over MCP: its writes stay hidden whatever the server allows (see registry.ts pull).
  * A site that does not load counts as one; call() then says why it does not, in its own fields.
@@ -270,7 +274,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
     "call_operation",
     {
       description:
-        "Call a site operation. Returns {ok, class, data, tier, healed?, ms, reason?, next?, nextCall?, retry?, retryAfterMs?, write?}; a list of two or more records comes back as data {columns, rows} when that shortens the JSON (one row per item, null for a missing field); otherwise it stays a list. `reason` also explains a slow success. On failure follow `next` (nextCall is the same step as data, with the tool to use) at most once, then stop and report. `retry` says whether to send the same call again: safe, after_wait (retryAfterMs), after_fix (once the step is done) or no." +
+        "Call a site operation. Returns {ok, class, data, tier, healed?, share?, ms, reason?, next?, nextCall?, retry?, retryAfterMs?, write?}; a list of two or more records comes back as data {columns, rows} when that shortens the JSON (one row per item, null for a missing field); otherwise it stays a list. `reason` also explains a slow success. On failure follow `next` (nextCall is the same step as data, with the tool to use) at most once, then stop and report. `retry` says whether to send the same call again: safe, after_wait (retryAfterMs), after_fix (once the step is done) or no. `share` means this call repaired a site someone shared: offer the user, in one line, to send the fix back as it says." +
         (allowWrites
           ? " Write operations change the user's account: only call them when the user asked for that exact action. A write's `write` says what it did: not_sent, not_applied, accepted or may_have_applied; never send one again that is accepted or may_have_applied without checking the site. The same write within 10 minutes is refused (class duplicate) unless again is true."
           : " Writes are disabled on this server."),
@@ -330,6 +334,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
             ...(r.data !== undefined ? { data: asTable(r.data) } : {}),
             ...(r.next ? { next: mcpNext(r.next) } : {}),
             ...(r.nextCall ? { nextCall: mcpNextCall(r.nextCall) } : {}),
+            ...(r.share ? { share: mcpShare(r.share) } : {}),
           },
           !r.ok,
         );

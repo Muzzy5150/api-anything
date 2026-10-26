@@ -156,11 +156,25 @@ describe("flags and command names", () => {
   });
 
   test("a command's help names the output fields an agent has to act on", async () => {
-    const named = { capture: ["blocked", "pageStatus"], add: ["replaced"], inspect: ["note"] };
+    const named = {
+      capture: ["blocked", "pageStatus"],
+      add: ["replaced"],
+      inspect: ["note"],
+      call: ["share"],
+      verify: ["share"],
+      heal: ["share"],
+      publish: ["strip-examples", "keep-examples"],
+    };
     for (const [command, fields] of Object.entries(named)) {
       const help = (await cli(command, "--help")).stdout;
       for (const field of fields) assert.match(help, new RegExp(`\\b${field}\\b`), `${command} --help: ${field}`);
     }
+  });
+
+  test("publish takes one of --keep-examples and --strip-examples, not both", async () => {
+    const r = await cli("publish", "plain", "--keep-examples", "--strip-examples");
+    assert.equal(r.code, 1);
+    assert.match(JSON.parse(r.stdout).error, /contradict/);
   });
 
   test("a malformed JSON flag points at the help of the command it was given to", async () => {

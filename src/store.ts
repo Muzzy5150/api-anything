@@ -373,12 +373,13 @@ export function settleWrite(id: string, status: WriteStatus, outcome: { ok: bool
 /**
  * A shareable copy: example values stripped from the stored request (param slots become `{name}`,
  * or null in a typed JSON leaf) and from params (unless `keepExamples`: a human confirmed they
- * are public), response shapes dropped (their keys can be user data), then scanned against this
- * machine's live session.
+ * are public; `"loggedOut"` keeps those of ops learned signed out, which publish lists for the human to
+ * check), response shapes dropped (their keys can be user data), then scanned against this machine's
+ * live session.
  */
 export function exportSite(
   name: string,
-  o: { keepExamples?: boolean } = {},
+  o: { keepExamples?: boolean | "loggedOut" } = {},
 ): { spec: Site; secrets: string[]; warnings: string[] } {
   const r = loadSite(name);
   if (!r) throw new Error(`no site "${name}"`);
@@ -400,7 +401,8 @@ export function exportSite(
         /* position gone; leave it */
       }
     }
-    if (!o.keepExamples) for (const p of op.params) delete p.example;
+    const keep = o.keepExamples === "loggedOut" ? !op.learnedLoggedIn : !!o.keepExamples;
+    if (!keep) for (const p of op.params) delete p.example;
     delete op.response.shape;
     const pub = new Set((op.public ?? []).map((h) => h.toLowerCase()));
     for (const h of pub) allowed.add(`$.operations[${i}].request.headers.${h}`);

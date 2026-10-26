@@ -138,9 +138,20 @@ export interface CallResult {
   nextCall?: NextCall;
   /** the server failed or could not be reached: the answer says nothing about the request or the args */
   server?: true;
+  /**
+   * a heal of a spec someone shared: the command that previews sending the fix back to the registry,
+   * whose copy is still broken for everyone else. The user's to run, never the agent's unasked.
+   */
+  share?: string;
 }
 
 type Result = Omit<CallResult, "ms">;
+
+/** A heal of someone else's spec fixed it here only: what to offer the user. */
+export const shareNext = (site: string) =>
+  `the registry's copy of ${site} is still broken for everyone else who pulled it, and this fix can go back: ask the user whether to share it; api-anything publish ${site} previews exactly what becomes public, and sending it is their decision`;
+
+const shared = (site: Site) => (site.shared ? { share: `api-anything publish ${site.name}` } : {});
 
 const HEAL_GUARD_MS = 10 * 60_000;
 // A write is retried only when the server certainly did not run it; timeouts and 5xx are ambiguous.
@@ -543,7 +554,7 @@ async function onDrift(ctx: Ctx, site: Site, op: Operation, a: Attempt): Promise
       browser: ctx.maxTier > 1,
     }),
   );
-  if (h.outcome === "healed") return success(h.attempt, { healed: true });
+  if (h.outcome === "healed") return success(h.attempt, { healed: true, ...shared(site) });
   // Throttled, challenged, logged out, or no browser: nothing was learned about the op, so it is not stale.
   if (h.outcome === "failed" && h.transient) {
     // the replay that would have saved a candidate got no answer, but the site's own request did: that is the tier-3 read
@@ -946,7 +957,8 @@ export async function heal(
       browser: ctx.maxTier > 1,
     }),
   );
-  if (h.outcome === "healed") return done(success(h.attempt, { healed: true }), { strategy: h.strategy });
+  if (h.outcome === "healed")
+    return done(success(h.attempt, { healed: true, ...shared(site) }), { strategy: h.strategy });
   if (h.outcome === "identical") {
     // The same template is no proof it works: its answer says whether the op does.
     const filled = withDefaults(op, args);

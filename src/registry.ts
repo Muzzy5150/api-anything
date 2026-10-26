@@ -30,7 +30,7 @@ export function registryBase(): string {
 }
 
 /** The body of `url`, or undefined on a 404. Read while streaming, so a huge answer stops at `cap`. */
-async function fetchCapped(url: string, cap: number, fetchImpl: typeof fetch): Promise<string | undefined> {
+export async function fetchCapped(url: string, cap: number, fetchImpl: typeof fetch): Promise<string | undefined> {
   // a redirect could move the fetch to any origin; the registry's files are served where they are
   const res = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(20_000) });
   if (res.status === 404) return undefined;

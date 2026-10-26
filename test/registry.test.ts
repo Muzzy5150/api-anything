@@ -18,7 +18,7 @@ import { verifySite } from "../src/checks.js";
 import { call, heal } from "../src/execute.js";
 import { healOperation } from "../src/heal.js";
 import { createServer as createMcpServer } from "../src/mcp.js";
-import { plan, submit, writeOutbox } from "../src/publish.js";
+import { againstRegistry, describeChanges, plan, submit, writeOutbox } from "../src/publish.js";
 import { buildIndex, indexEntry, pull, search } from "../src/registry.js";
 import { loadSession, mergeCapture, saveSession, siteOf } from "../src/session.js";
 import { parseSite, type Site } from "../src/spec.js";
@@ -551,7 +551,7 @@ test("publish runs on verify's record: every counted check passes, inconclusive 
       },
     ),
   );
-  const before = plan("demo", { keepExamples: true }).errors.join("\n");
+  const before = plan("demo", { examples: "all" }).errors.join("\n");
   assert.match(
     before,
     /search: example 2 \(q=cats\) was answered with example 1's data, so nothing shows the server reads q: add it again/,
@@ -570,7 +570,7 @@ test("publish runs on verify's record: every counted check passes, inconclusive 
   // the example and check 1 differ only in q and answer differently: q is read after all
   assert.deepEqual(v.proven, ["search"]);
   assert.equal(loadSite("demo")!.site.operations[0]!.unproven, undefined);
-  const p = plan("demo", { keepExamples: true });
+  const p = plan("demo", { examples: "all" });
   assert.deepEqual(p.errors, []);
   assert.match(p.personal.join("\n"), /checks\[0\] sends q=zzzz: is every value public/);
 
@@ -584,7 +584,7 @@ test("publish runs on verify's record: every counted check passes, inconclusive 
     "PUT repos/octo/api-anything/contents/sites/demo.json": {},
     [`POST ${up}/pulls`]: { html_url: "https://github.com/goodnight000/api-anything/pull/8" },
   });
-  await submit("demo", { keepExamples: true, retryMs: 1 });
+  await submit("demo", { examples: "all", retryMs: 1 });
   const body = String(gh.log().find((c) => c.args[3] === `${up}/pulls`)!.input?.body);
   assert.match(body, /\| `search` \| example \| result \| pass \|/);
   assert.match(body, /\| `search` \| check 1 \(q=zzzz\): no story is called zzzz \| empty \| pass \|/);
@@ -702,7 +702,159 @@ test("publish --yes sends exactly the preview, as a pull request from the user's
   assert.equal(Buffer.from(String(put.input?.content), "base64").toString(), p.files[0]!.text);
   const pr = calls.find((c) => c.args[3] === `${up}/pulls`)!;
   assert.equal(pr.input?.head, `octo:${r.branch}`);
-  assert.match(String(pr.input?.title), /^Add demo \(1 operation\)$/);
+  assert.equal(pr.input?.title, "Add sites/demo.json");
+});
+
+test("publish keeps the examples of ops learned signed out, listed to check; --keep-examples and --strip-examples", () => {
+  const signedIn = {
+    ...spec().operations[0]!,
+    name: "feed",
+    learnedLoggedIn: true,
+    params: [{ name: "q", example: "mine" }],
+  };
+  saveSite(
+    parseSite({
+      ...spec({}, { params: [{ name: "q", example: "piranesi" }] }),
+      operations: [spec({}, { params: [{ name: "q", example: "piranesi" }] }).operations[0]!, signedIn],
+    }),
+  );
+  const kept = (p: ReturnType<typeof plan>) =>
+    parseSite(JSON.parse(p.files[0]!.text)).operations.map((op) => op.params[0]!.example);
+  const listed = (p: ReturnType<typeof plan>) => p.personal.filter((x) => /keeps its example/.test(x));
+
+  const byDefault = plan("demo");
+  assert.deepEqual(kept(byDefault), ["piranesi", undefined]);
+  assert.deepEqual(listed(byDefault), ['$.operations[0] param q keeps its example "piranesi": public?']);
+  assert.ok(byDefault.stripped.includes("param examples of ops learned signed in"));
+
+  const all = plan("demo", { examples: "all" });
+  assert.deepEqual(kept(all), ["piranesi", "mine"]);
+  assert.equal(listed(all).length, 2);
+
+  const none = plan("demo", { examples: "none" });
+  assert.deepEqual(kept(none), [undefined, undefined]);
+  assert.deepEqual(listed(none), []);
+  assert.ok(none.stripped.includes("param examples"));
+});
+
+test("a pulled spec healed then published opens an update: its title, what changed against the registry, the file's sha", async () => {
+  const pulledAs = parseSite({
+    ...tokened,
+    operations: [{ ...tokened.operations[0]!, params: [{ name: "q", example: "cats" }] }],
+  });
+  share(pulledAs);
+  await pull("demo");
+  const pulled = loadSite("demo")!.site;
+  // what a heal writes: a user copy with the new token and the mark kept
+  const healed = {
+    ...pulled.operations[0]!,
+    request: {
+      ...pulled.operations[0]!.request,
+      url: `https://news.example.com/api/v2/search?q=kittens&t=${"b2".repeat(16)}`,
+    },
+    match: { host: "news.example.com", path: "/api/v2/search" },
+  };
+  saveSite({ ...pulled, operations: [healed] });
+
+  const p = plan("demo");
+  assert.equal(p.pulled, pulled.shared?.sha256);
+  assert.ok(p.stripped.includes("where it was pulled from"));
+  writeOutbox(p);
+
+  const up = "repos/goodnight000/api-anything";
+  const blob = "c".repeat(40);
+  const gh = fakeGh({
+    "GET user": { login: "octo", id: 42 },
+    [`POST ${up}/forks`]: { full_name: "octo/api-anything" },
+    "POST repos/octo/api-anything/merge-upstream": {},
+    [`GET ${up}/git/ref/heads/main`]: { object: { sha: "a".repeat(40) } },
+    "POST repos/octo/api-anything/git/refs": {},
+    [`GET ${up}/contents/sites/demo.json`]: { sha: blob },
+    "GET repos/octo/api-anything/contents/sites/demo.json": { sha: blob },
+    "PUT repos/octo/api-anything/contents/sites/demo.json": {},
+    [`POST ${up}/pulls`]: { html_url: "https://github.com/goodnight000/api-anything/pull/8" },
+  });
+  const r = await submit("demo", { retryMs: 1 });
+  assert.equal(r.update, true);
+  const calls = gh.log();
+  const put = calls.find((c) => c.args[2] === "PUT")!;
+  assert.equal(put.input?.sha, blob, "updating a file sends the sha of the one it replaces");
+  assert.equal(put.input?.message, "Update sites/demo.json");
+  const pr = calls.find((c) => c.args[3] === `${up}/pulls`)!;
+  assert.equal(pr.input?.title, "Update sites/demo.json");
+  const body = String(pr.input?.body);
+  assert.match(body, /^Updates the spec of `demo`/);
+  assert.match(body, /Against the registry's current copy:\n- A heal of the registry's current copy/);
+  assert.match(body, /- Changed: `search` \(request URL, match\)\n/);
+  assert.doesNotMatch(
+    body,
+    /param examples|request host|Added|Removed/,
+    "the kept example is the one the registry has",
+  );
+
+  // the registry moved on since the pull: the diff says so, and lists what was added there
+  share({ ...pulledAs, operations: [...pulledAs.operations, { ...pulledAs.operations[0]!, name: "top" }] });
+  const later = await againstRegistry(plan("demo"));
+  assert.equal(later?.base, "older");
+  assert.deepEqual(later?.removed, ["top"]);
+  assert.match(describeChanges(later!).join("\n"), /older version.*may undo/);
+});
+
+test("a heal of a spec someone shared says the fix can go back; a heal of the user's own does not", async () => {
+  const NEW = "f0".repeat(16);
+  let drop = false;
+  const site = (h: string): typeof fetch =>
+    (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://news.example.com/search"))
+        return new Response(`<script>var apiToken = "${NEW}";</script>`, { headers: { "content-type": "text/html" } });
+      if (url.includes(`t=${NEW}`)) return json({ hits: [{ title: "cats" }] });
+      // A shared spec heals only by recapture, which needs a browser this test has none of: the first
+      // answer drops the mark between the call's load of the spec and the heal's, so a rescan heals it.
+      if (drop) {
+        drop = false;
+        saveSite({ ...loadSite(h)!.site, shared: undefined });
+      }
+      return new Response("", { status: 404 });
+    }) as typeof fetch;
+  const run = (h: string) => call(h, "search", { q: "cats" }, { maxTier: 1, minIntervalMs: 0, fetchImpl: site(h) });
+
+  share(tokened);
+  await pull("demo");
+  drop = true;
+  const theirs = await run("demo");
+  assert.deepEqual(
+    [theirs.ok, theirs.healed, theirs.share],
+    [true, true, "api-anything publish demo"],
+    JSON.stringify(theirs),
+  );
+
+  saveSite({ ...tokened, name: "own" });
+  const own = await run("own");
+  assert.deepEqual([own.ok, own.healed, own.share], [true, true, undefined], JSON.stringify(own));
+
+  // over MCP, which cannot publish: the user is asked to run the command
+  process.env.API_ANYTHING_HOME = mkdtempSync(join(tmpdir(), "aa-registry-"));
+  await pull("demo");
+  const client = new Client({ name: "probe", version: "0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await createMcpServer().connect(a);
+  await client.connect(b);
+  const real = globalThis.fetch;
+  globalThis.fetch = site("demo");
+  try {
+    drop = true;
+    const r = await client.callTool({
+      name: "call_operation",
+      arguments: { site: "demo", op: "search", args: { q: "cats" } },
+    });
+    const res = JSON.parse((r.content as { text: string }[])[0]!.text);
+    assert.equal(res.healed, true, JSON.stringify(res));
+    assert.match(res.share, /ask the user .* run in a terminal: api-anything publish demo/);
+  } finally {
+    globalThis.fetch = real;
+    await client.close();
+  }
 });
 
 test("a publish that fails after its files reached the fork says they are public there", async () => {

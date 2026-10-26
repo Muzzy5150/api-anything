@@ -6,7 +6,7 @@ import { z } from "zod";
 import { browserAvailable, closeBrowser, login, ProfileInUse } from "./browser.js";
 import { verifySite } from "./checks.js";
 import { botWall, emptyResults, loginPath, signInForm } from "./classify.js";
-import { call, heal, type Tier } from "./execute.js";
+import { call, heal, shareNext, type Tier } from "./execute.js";
 import { capOutput, extract, getPath, innerJson, pick, returnedFields, splitPick } from "./extract.js";
 import {
   addOperation,
@@ -24,7 +24,7 @@ import { AmbiguousProfile } from "./import.js";
 import { type Candidate, capturePages, pageUrls, rankCandidates } from "./learn.js";
 import { cookieNames, importSession, logout, resolveLoginTarget } from "./login.js";
 import { type Outline, outline } from "./outline.js";
-import { plan, submit, writeOutbox } from "./publish.js";
+import { againstRegistry, describeChanges, plan, submit, writeOutbox } from "./publish.js";
 import { pull, search } from "./registry.js";
 import { loadSession, loggedIn, saveSession, sessionFile, withLock } from "./session.js";
 import { CheckSchema, HtmlRecipeSchema, MatchSchema, type Operation, type Param, TriggerStepSchema } from "./spec.js";
@@ -121,7 +121,8 @@ const HELP: Record<string, string> = {
   An op whose captured response is a bot challenge, a sign-in page, a rate limit or a server failure
   is not saved.`,
   call: `api-anything call <site> <op> [k=v ...] [--json <args-object>] [--allow-writes] [--again] [--idempotency-key <k>] [--max-tier 1|2|3] [--dry]
-  Calls an operation: {ok, class, data, tier, healed?, ms, next?}; a failure also says retry
+  Calls an operation: {ok, class, data, tier, healed?, share?, ms, next?}; share is the command that
+  offers a heal of a pulled spec back to the registry, for the user to decide on. A failure also says retry
   (safe, after_wait, after_fix, no), retryAfterMs and nextCall, and a write says write (not_sent,
   not_applied, accepted, may_have_applied). --dry prints the request with credentials redacted.
   --again           send a write refused as a duplicate (the same args within 10 minutes, and the
@@ -132,7 +133,8 @@ const HELP: Record<string, string> = {
   judges each case: pass, fail, or inconclusive (a challenge, a sign-in page, a rate limit, or a server
   that failed or could not be reached: it says nothing about the op). The outcomes are kept per op, for
   publish. An op marked unproven loses the mark when two passing cases that differ only in its
-  unproven params answer differently.`,
+  unproven params answer differently. A heal of a spec pulled from the registry says share: the fix
+  can go back with api-anything publish.`,
   check: `api-anything check <site> <op> [k=v ...] --expect result|empty|input [--purpose <text>]
   Records a check on a read: args a human confirmed on the site, and what the site answers them with
   (result: data; empty: no data, the site's own no-results; input: the site refuses the args). verify
@@ -145,7 +147,8 @@ const HELP: Record<string, string> = {
   Lists a site's operations and params (with each param's format), and the site's notes: caveats,
   arg formats and login advice from <site>.md beside its spec.`,
   heal: `api-anything heal <site> <op> [k=v ...]
-  Forces a heal (rescan, then recapture) even when the op is marked stale. Reads only.`,
+  Forces a heal (rescan, then recapture) even when the op is marked stale. Reads only. A heal of a
+  spec pulled from the registry says share: the fix can go back with api-anything publish.`,
   export: `api-anything export <site> [--out <file>] [--keep-examples] [--force]
   Writes a shareable spec: examples and response shapes stripped, and refused if a live cookie or
   session value is inside. --keep-examples keeps param examples you confirmed are public (so verify works).`,
@@ -161,14 +164,18 @@ const HELP: Record<string, string> = {
   checked against the shared rules first, and its writes still need --allow-writes. Prints each op
   (method, hosts, write, login) and the warnings a human should read; a pull again names what changed.
   API_ANYTHING_REGISTRY overrides the registry's base URL.`,
-  publish: `api-anything publish <site> [--keep-examples] [--yes]
-  Shares a spec you learned: opens a pull request adding it to the registry, so others can pull it
-  instead of learning the site again. Without --yes it only previews: the exact files that would be
-  public (written to ~/.api-anything/outbox), what was stripped, the warnings, and what may be yours
-  (an email, an account id, a literal typed into the page). It refuses a spec holding a live cookie or
-  session value. --yes sends that preview, unchanged, with the GitHub CLI (gh, signed in): a fork, a
-  branch, commits under your account's noreply address, and a public pull request under your account.
-  --keep-examples keeps param examples you confirmed are public (so verify works for others).`,
+  publish: `api-anything publish <site> [--keep-examples | --strip-examples] [--yes]
+  Shares a spec you learned, or a fix of one you pulled: opens a pull request adding it to the
+  registry, or updating the registry's copy, so others can pull it instead of learning the site again.
+  Without --yes it only previews: the exact files that would be public (written to
+  ~/.api-anything/outbox), what was stripped, the warnings, what may be yours (an email, an account id,
+  a literal typed into the page, each param example kept), and for a site the registry has, what
+  changed against its copy (ops added, changed or removed, and which parts). It refuses a spec holding
+  a live cookie or session value. --yes sends that preview, unchanged, with the GitHub CLI (gh, signed
+  in): a fork, a branch, commits under your account's noreply address, and a public pull request under
+  your account. Param examples of ops learned signed out are kept (so verify works for others) and
+  listed to check; those of ops learned signed in are stripped. --keep-examples keeps those too,
+  --strip-examples strips every one.`,
   mcp: `api-anything mcp [--allow-writes]
   Serves list_sites, find_sites, list_operations, call_operation and login over stdio MCP. MCP cannot
   learn operations (use capture/add here). list_operations pulls a shared site an agent asks for, with
@@ -279,6 +286,7 @@ const OPTIONS = {
   public: { type: "string" },
   path: { type: "string" },
   "keep-examples": { type: "boolean" },
+  "strip-examples": { type: "boolean" },
   extract: { type: "string" },
   pick: { type: "string" },
   html: { type: "string" },
@@ -754,11 +762,14 @@ async function cmdVerify({ pos }: Parsed): Promise<number> {
   const names = pos[0] ? [requireSite(pos[0]).site.name] : listSites();
   const results: Record<string, unknown>[] = [];
   const proven: string[] = [];
+  const healedShared = new Set<string>();
   for (const name of names) {
     try {
       const v = await verifySite(name);
       results.push(...v.results.map((r) => ({ site: name, ...r, ok: "outcome" in r && r.outcome === "pass" })));
       proven.push(...v.proven.map((op) => `${name}/${op}`));
+      // a heal keeps the mark on its copy: the fix is of someone else's spec
+      if (v.results.some((r) => "healed" in r && r.healed) && loadSite(name)?.site.shared) healedShared.add(name);
     } catch (e) {
       results.push({ site: name, ok: false, error: oneLine((e as Error).message) });
     }
@@ -767,7 +778,8 @@ async function cmdVerify({ pos }: Parsed): Promise<number> {
   const ok = results.every((r) => r.ok);
   const own = pos[0] ? loadSite(pos[0]) : undefined;
   // a site the user learned and just saw work is one others could use
-  const share = ok && own?.source === "user" && !own.site.shared;
+  const learned = ok && own?.source === "user" && !own.site.shared;
+  const fixed = [...healedShared];
   out({
     ok,
     counts: {
@@ -778,9 +790,14 @@ async function cmdVerify({ pos }: Parsed): Promise<number> {
     },
     results,
     ...(proven.length ? { proven } : {}),
-    ...(share
-      ? { next: `api-anything publish ${own.site.name} previews sharing it, so others need not learn it` }
-      : {}),
+    ...(fixed.length
+      ? {
+          share: fixed.map((s) => `api-anything publish ${s}`).join("; "),
+          next: fixed.map((s) => shareNext(s)).join("; "),
+        }
+      : learned
+        ? { next: `api-anything publish ${own.site.name} previews sharing it, so others need not learn it` }
+        : {}),
   });
   if (!ok)
     process.stderr.write(
@@ -898,7 +915,7 @@ async function cmdHeal({ pos }: Parsed): Promise<number> {
   if (!site || !name) throw new Fail("missing <site> <op>", "api-anything heal <site> <op>");
   const op = requireSite(site).site.operations.find((o) => o.name === name);
   const r = await heal(site, name, { ...(op ? examplesOf(op) : {}), ...kv(rest) });
-  out(r);
+  out(r.share ? { ...r, next: shareNext(requireSite(site).site.name) } : r);
   if (!r.ok) process.stderr.write(`next: ${r.next}\n`);
   return r.ok ? 0 : 1;
 }
@@ -968,33 +985,46 @@ async function cmdPull({ pos }: Parsed): Promise<number> {
 
 async function cmdPublish({ v, pos }: Parsed): Promise<number> {
   const { site } = requireSite(pos[0]);
-  const keepExamples = v["keep-examples"];
-  const again = `api-anything publish ${site.name}${keepExamples ? " --keep-examples" : ""}`;
+  if (v["keep-examples"] && v["strip-examples"])
+    throw new Fail("--keep-examples and --strip-examples contradict each other", "pass one of them, or neither");
+  const examples = v["keep-examples"] ? "all" : v["strip-examples"] ? "none" : undefined;
+  const again = `api-anything publish ${site.name}${examples === "all" ? " --keep-examples" : examples === "none" ? " --strip-examples" : ""}`;
   if (!v.yes) {
-    const p = plan(site.name, { keepExamples });
+    const p = plan(site.name, { examples });
     if (p.errors.length)
       throw new Fail(
         `refusing to publish ${p.site}: ${p.errors.length} problem(s)`,
         "fix each one (a live value: re-add the op so learning makes it a ref) and preview again",
         { errors: p.errors },
       );
+    let changes: Awaited<ReturnType<typeof againstRegistry>>;
+    try {
+      changes = await againstRegistry(p);
+    } catch (e) {
+      throw new Fail(
+        `cannot read the registry's copy of ${p.site}: ${(e as Error).message}`,
+        "check the network (and API_ANYTHING_REGISTRY if set), then preview again",
+      );
+    }
     out({
       ok: true,
       site: p.site,
       files: writeOutbox(p),
       operations: p.operations,
+      update: changes !== undefined,
+      ...(changes ? { changes: describeChanges(changes) } : {}),
       stripped: p.stripped,
       warnings: p.warnings,
       personal: p.personal,
       checks: p.checks,
       public: "the files and the pull request are public, under your GitHub account",
-      next: `show the user the files and every warning and personal item; only with their explicit OK: ${again} --yes`,
+      next: `show the user the files, every warning${changes ? ", every personal item and the changes" : " and every personal item"}; only with their explicit OK: ${again} --yes`,
     });
     return 0;
   }
   let r: Awaited<ReturnType<typeof submit>>;
   try {
-    r = await submit(site.name, { keepExamples });
+    r = await submit(site.name, { examples });
   } catch (e) {
     const m = (e as Error).message;
     throw new Fail(
@@ -1062,7 +1092,7 @@ const COMMANDS: Record<string, { run: (p: Parsed) => number | Promise<number>; f
   export: { run: cmdExport, flags: ["out", "keep-examples", "force"] },
   search: { run: cmdSearch, flags: [] },
   pull: { run: cmdPull, flags: [] },
-  publish: { run: cmdPublish, flags: ["keep-examples", "yes"] },
+  publish: { run: cmdPublish, flags: ["keep-examples", "strip-examples", "yes"] },
   mcp: { run: cmdMcp, flags: ["allow-writes"] },
 };
 

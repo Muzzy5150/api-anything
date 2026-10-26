@@ -8,10 +8,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { checksTable, type Gate, gate } from "./checks.js";
-import { REPO, summarize } from "./registry.js";
+import { fetchCapped, REPO, registryBase, summarize } from "./registry.js";
 import { besideOrigins, credentialsOf, ipIn, opUrls, scanSecrets } from "./secrets.js";
 import { home, loadSession, safeName, writePrivate } from "./session.js";
-import type { Site } from "./spec.js";
+import { type Operation, parseSite, type Site } from "./spec.js";
 import { exportSite, loadSite } from "./store.js";
 import { LIMITS, vetShared } from "./vet.js";
 
@@ -55,6 +55,8 @@ function personal(spec: Site, notes: string | undefined): string[] {
       for (const v of p.enum ?? [])
         if (/\d{5,}/.test(v))
           found.push(`${at} param ${p.name} allows "${v}": is it your account's, or one of the site's own options?`);
+      if (p.example !== undefined)
+        found.push(`${at} param ${p.name} keeps its example ${JSON.stringify(p.example)}: public?`);
     }
     // a check's args are typed by the publisher, as a fill step's value is
     for (const [j, c] of (op.checks ?? []).entries())
@@ -82,14 +84,24 @@ export interface Plan {
   personal: string[];
   /** each op's last verify on its current version: put in the pull request */
   checks: Gate["rows"];
+  /** the hash of the registry copy this spec was pulled as, when it was pulled */
+  pulled?: string;
 }
 
+/**
+ * Which param examples go out: by default those of ops learned signed out, each listed in `personal`
+ * for the human to check (verify, and anything testing the shared spec, needs them); `all` keeps those
+ * of ops learned signed in too, `none` strips every one.
+ */
+export type Examples = "loggedOut" | "all" | "none";
+
 /** The preview: the export, the shared rules, a live-secret scan no `public` name waives, and the privacy checks. */
-export function plan(name: string, o: { keepExamples?: boolean } = {}): Plan {
+export function plan(name: string, o: { examples?: Examples } = {}): Plan {
   name = safeName(name);
   const r = loadSite(name);
   if (!r) throw new Error(`no site "${name}"`);
-  const ex = exportSite(name, o);
+  const examples = o.examples ?? "loggedOut";
+  const ex = exportSite(name, { keepExamples: examples === "loggedOut" ? "loggedOut" : examples === "all" });
   const notesPath = join(dirname(r.path), `${name}.md`);
   const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : undefined;
   const live = credentialsOf(
@@ -121,7 +133,12 @@ export function plan(name: string, o: { keepExamples?: boolean } = {}): Plan {
       .digest("hex"),
     operations: ex.spec.operations.map(summarize),
     stripped: [
-      ...(o.keepExamples ? [] : ["param examples"]),
+      ...(examples === "none"
+        ? ["param examples"]
+        : examples === "loggedOut" &&
+            r.site.operations.some((op) => op.learnedLoggedIn && op.params.some((p) => p.example !== undefined))
+          ? ["param examples of ops learned signed in"]
+          : []),
       "response shapes",
       "when each op was learned",
       ...(r.site.shared ? ["where it was pulled from"] : []),
@@ -130,7 +147,95 @@ export function plan(name: string, o: { keepExamples?: boolean } = {}): Plan {
     warnings: [...new Set([...ex.warnings, ...vet.warnings])],
     personal: personal(ex.spec, notes),
     checks: checked.rows,
+    ...(r.site.shared ? { pulled: r.site.shared.sha256 } : {}),
   };
+}
+
+/* ------------------------------------------------------------ against the registry */
+
+export interface Changes {
+  /** the registry's copy is the one this spec was pulled as (`current`: this is a heal of it), or an older one */
+  base?: "current" | "older";
+  added: string[];
+  removed: string[];
+  changed: { op: string; parts: string[] }[];
+  /** the spec's own fields other than its ops */
+  site: string[];
+}
+
+/** The parts of an op a reviewer of a change looks at, each compared on its own. */
+const PARTS: [string, (op: Operation) => unknown][] = [
+  ["request host", (op) => new URL(op.request.url).host],
+  ["request URL", (op) => `${op.request.method} ${op.request.url.replace(/^[^/]*\/\/[^/]*/, "")}`],
+  ["request headers or body", (op) => [op.request.headers, op.request.body]],
+  ["slots", (op) => op.slots],
+  ["volatile tokens", (op) => op.volatile],
+  ["response recipe", (op) => op.response],
+  ["trigger", (op) => op.trigger],
+  ["match", (op) => op.match],
+  ["params", (op) => op.params.map(({ example: _, ...p }) => p)],
+  ["param examples", (op) => op.params.map((p) => p.example)],
+  ["checks", (op) => op.checks],
+];
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+// what export strips is no change: the registry's copy went through export too
+const comparable = (op: Operation): Operation => ({
+  ...op,
+  learnedAt: undefined,
+  response: { ...op.response, shape: undefined },
+});
+
+/**
+ * The registry's current copy of the plan's site against what the plan sends, fetched the way pull
+ * fetches it; undefined when the registry has none.
+ */
+export async function againstRegistry(p: Plan, fetchImpl: typeof fetch = fetch): Promise<Changes | undefined> {
+  const from = `${registryBase()}/sites/${p.site}.json`;
+  const text = await fetchCapped(from, LIMITS.file, fetchImpl);
+  if (text === undefined) return undefined;
+  let theirs: Site;
+  try {
+    theirs = parseSite(JSON.parse(text));
+  } catch (e) {
+    throw new Error(`${from}: ${(e as Error).message.split("\n")[0]}`);
+  }
+  const ours = parseSite(JSON.parse(p.files[0]!.text));
+  const old = new Map(theirs.operations.map((op) => [op.name, comparable(op)]));
+  const now = new Map(ours.operations.map((op) => [op.name, comparable(op)]));
+  const changed = [...now].flatMap(([name, op]) => {
+    const before = old.get(name);
+    if (!before || same(before, op)) return [];
+    const parts = PARTS.filter(([, of]) => !same(of(before), of(op))).map(([part]) => part);
+    return [{ op: name, parts: parts.length ? parts : ["other fields"] }];
+  });
+  const fields = new Set([...Object.keys(theirs), ...Object.keys(ours)] as (keyof Site)[]);
+  const sha256 = createHash("sha256").update(text).digest("hex");
+  return {
+    ...(p.pulled ? { base: p.pulled === sha256 ? ("current" as const) : ("older" as const) } : {}),
+    added: [...now.keys()].filter((n) => !old.has(n)),
+    removed: [...old.keys()].filter((n) => !now.has(n)),
+    changed,
+    site: [...fields].filter((k) => k !== "operations" && k !== "name" && !same(theirs[k], ours[k])),
+  };
+}
+
+/** The changes as lines, for the preview and the pull request. */
+export function describeChanges(c: Changes): string[] {
+  const code = (names: string[]) => names.map((n) => `\`${n}\``).join(", ");
+  const none = !c.added.length && !c.removed.length && !c.changed.length && !c.site.length;
+  return [
+    ...(c.base === "current"
+      ? ["A heal of the registry's current copy: this spec was pulled as that version and repaired when it drifted."]
+      : c.base === "older"
+        ? ["This spec was pulled as an older version of the registry's copy: a change below may undo one made since."]
+        : []),
+    ...(c.added.length ? [`Added: ${code(c.added)}`] : []),
+    ...(c.removed.length ? [`Removed: ${code(c.removed)}`] : []),
+    ...c.changed.map((x) => `Changed: \`${x.op}\` (${x.parts.join(", ")})`),
+    ...(c.site.length ? [`Site fields changed: ${c.site.join(", ")}`] : []),
+    ...(none ? ["Nothing changed."] : []),
+  ];
 }
 
 /** Write the preview's files to the outbox, where the human reads them and `--yes` checks them. */
@@ -202,7 +307,7 @@ const field = (v: unknown, key: string, re: RegExp): string => {
   return String(x);
 };
 
-function prBody(p: Plan, update: boolean): string {
+function prBody(p: Plan, update: boolean, changes: Changes | undefined): string {
   const ops = p.operations.map(
     (o) =>
       `| \`${o.op.replace(/\|/g, "\\|")}\` | ${o.method} | ${o.hosts.join(", ")} | ${o.write ? "write" : "read"}${o.login ? ", needs login" : ""} |`,
@@ -213,6 +318,7 @@ function prBody(p: Plan, update: boolean): string {
     "| operation | method | hosts | kind |",
     "|---|---|---|---|",
     ...ops,
+    ...(changes ? ["", "Against the registry's current copy:", ...describeChanges(changes).map((l) => `- ${l}`)] : []),
     "",
     `Stripped before sending: ${p.stripped.join(", ")}. The shared rules passed, and no live cookie or session value of the publisher's was found in it.`,
     "",
@@ -236,13 +342,17 @@ export interface Published {
  * (a second run with the same content opens nothing new), authored and committed under the account's
  * noreply address, not the user's git email.
  */
-export async function submit(name: string, o: { keepExamples?: boolean; retryMs?: number } = {}): Promise<Published> {
+export async function submit(
+  name: string,
+  o: { examples?: Examples; retryMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<Published> {
   name = safeName(name);
   const p = plan(name, o);
   if (p.errors.length) throw new Error(`refusing to publish: ${p.errors.join("; ")}`);
   const seen = previewed(name);
   if (!seen) throw new Error(`no preview of ${name} yet`);
   if (seen !== p.sha256) throw new Error(`${name} changed since its preview`);
+  const changes = await againstRegistry(p, o.fetchImpl);
 
   const user = await api("GET", "user");
   const login = field(user, "login", /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/);
@@ -274,8 +384,9 @@ export async function submit(name: string, o: { keepExamples?: boolean; retryMs?
       const there = await optional(api("GET", `repos/${fork}/contents/${f.path}?ref=${encodeURIComponent(branch)}`));
       const sha = there && field(there, "sha", /^[0-9a-f]{40}$/);
       sent.push(f.path);
+      // replacing a file takes its blob sha: the branch starts at the registry's main, so a file there is here
       await api("PUT", `repos/${fork}/contents/${f.path}`, {
-        message: `${update ? "Update" : "Add"} ${f.path}`,
+        message: `${sha ? "Update" : "Add"} ${f.path}`,
         content: Buffer.from(f.text).toString("base64"),
         branch,
         ...(sha ? { sha } : {}),
@@ -283,7 +394,7 @@ export async function submit(name: string, o: { keepExamples?: boolean; retryMs?
         committer: who,
       });
     }
-    const title = `${update ? "Update" : "Add"} ${name} (${p.operations.length} operation${p.operations.length === 1 ? "" : "s"})`;
+    const title = `${update ? "Update" : "Add"} sites/${name}.json`;
     let pr: string;
     try {
       pr = field(
@@ -291,7 +402,7 @@ export async function submit(name: string, o: { keepExamples?: boolean; retryMs?
           title,
           head: `${owner}:${branch}`,
           base: "main",
-          body: prBody(p, update),
+          body: prBody(p, update, changes),
         }),
         "html_url",
         /^https:\/\/github\.com\//,
