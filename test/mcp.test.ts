@@ -94,6 +94,24 @@ function saveMixed(base: string, name = "mw", readback = false): void {
   );
 }
 
+/** A site with one operation, for checking how --sites names and routes its per-op tool. */
+function saveOne(name: string, op: string, readOnly: boolean): void {
+  saveSite(
+    parseSite({
+      name,
+      baseUrl: "https://example.test",
+      operations: [
+        {
+          name: op,
+          readOnly,
+          request: { method: readOnly ? "GET" : "POST", url: `https://example.test/${name}/${op}` },
+          trigger: { url: "https://example.test/" },
+        },
+      ],
+    }),
+  );
+}
+
 async function localSite() {
   let hits = 0;
   const server = httpServer((_req, res) => {
@@ -338,7 +356,10 @@ test("MCP --sites registers each op as a tool of its own, with its schema and a 
 test("MCP per-op tool names fit every client's limit and characters, and stay distinct when cut", () => {
   const op = (name: string) => ({ name }) as Pick<Operation, "name">;
   assert.equal(toolName("hacker-news", op("search")), "hacker-news__search");
-  assert.equal(toolName("hn.demo", op("links")), "hn_demo__links");
+  assert.match(toolName("hn.demo", op("links")), /^hn_demo__links_[0-9a-f]{8}$/);
+  assert.notEqual(toolName("hn.demo", op("links")), toolName("hn_demo", op("links")));
+  assert.notEqual(toolName("a", op("b__c")), toolName("a__b", op("c")));
+  assert.notEqual(toolName("a_", op("b")), toolName("a", op("_b")));
   const long = "x".repeat(80);
   const a = toolName("site", op(`${long}a`));
   const b = toolName("site", op(`${long}b`));
@@ -347,6 +368,48 @@ test("MCP per-op tool names fit every client's limit and characters, and stay di
     assert.match(n, /^[a-zA-Z0-9_-]+$/);
   }
   assert.notEqual(a, b);
+});
+
+test("MCP --sites keeps punctuation and separator-ambiguous operations distinct and routes each one", async () => {
+  const pairs = [
+    { site: "demo.site", op: "search", readOnly: true },
+    { site: "demo_site", op: "search", readOnly: false },
+    { site: "a", op: "b__c", readOnly: true },
+    { site: "a__b", op: "c", readOnly: false },
+  ];
+  const expectedNames = pairs.map(({ site, op }) => toolName(site, { name: op } as Operation));
+  assert.equal(new Set(expectedNames).size, pairs.length);
+
+  const listed: string[][] = [];
+  for (const order of [pairs, [...pairs].reverse()]) {
+    const calls: string[] = [];
+    const call = (async (site: string, op: string) => {
+      calls.push(`${site}/${op}`);
+      return { ok: true, class: "ok", data: [{ site, op }], tier: 1, ms: 0 };
+    }) as unknown as NonNullable<ServerOptions["run"]>["call"];
+    const s = await connect();
+    try {
+      for (const pair of pairs) saveOne(pair.site, pair.op, pair.readOnly);
+      await s.start({ sites: order.map(({ site }) => site), allowWrites: true, run: { call } });
+      const { tools } = await s.client.listTools();
+      const perOp = tools.filter((t) => expectedNames.includes(t.name));
+      listed.push(perOp.map((t) => t.name).sort());
+      assert.equal(perOp.length, pairs.length);
+      for (const [i, pair] of pairs.entries()) {
+        const name = expectedNames[i]!;
+        assert.deepEqual(tools.find((t) => t.name === name)?.annotations, pair.readOnly ? READ_HINTS : WRITE_HINTS);
+        const result = await s.tool(name);
+        assert.deepEqual(result.data, [{ site: pair.site, op: pair.op }]);
+      }
+      assert.deepEqual(
+        calls,
+        pairs.map(({ site, op }) => `${site}/${op}`),
+      );
+    } finally {
+      await s.done();
+    }
+  }
+  assert.deepEqual(listed[0], listed[1]);
 });
 
 test("MCP inputSchema keeps a number's enum as numbers, and an op with no params takes none", () => {
