@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSettings } from "../src/identity.js";
-import { detect, paths, SERVER, setup } from "../src/setup.js";
+import { detect, guiServer, paths, SERVER, setup } from "../src/setup.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SKILL = readFileSync(join(ROOT, "skills", "api-anything", "SKILL.md"), "utf8");
@@ -59,8 +59,38 @@ function seed() {
 
 const ALL = ["claude-code", "codex", "cursor", "claude-desktop"] as const;
 
+/** An executable named `name` in the test's PATH. */
+function fakeExe(name: string) {
+  writeFileSync(join(bin, name), "#!/bin/sh\n");
+  chmodSync(join(bin, name), 0o755);
+}
+
+test("GUI apps get npx by absolute path (from PATH, else beside the running node) with node on PATH; shell agents keep bare npx", async () => {
+  fakeExe("npx"); // without node beside it, node's own directory goes on PATH
+  assert.deepEqual(guiServer(), {
+    command: join(bin, "npx"),
+    args: SERVER.args,
+    env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+  });
+  rmSync(join(bin, "npx"));
+  const beside = join(dirname(process.execPath), "npx");
+  if (existsSync(beside)) assert.equal(guiServer().command, beside);
+  write(paths.cursorJson(), "{}");
+  write(paths.claudeJson(), "{}");
+  await setup({ agents: ["cursor", "claude-code"], share: false });
+  assert.deepEqual(json(paths.cursorJson()).mcpServers["api-anything"], guiServer());
+  assert.deepEqual(json(paths.claudeJson()).mcpServers["api-anything"], SERVER);
+  // an entry already there, the bare one an earlier setup wrote included, is kept
+  write(paths.desktopJson(), JSON.stringify({ mcpServers: { "api-anything": SERVER } }));
+  const r = await setup({ agents: ["claude-desktop"], share: false });
+  assert.equal(r.agents[0]!.mcp, "kept");
+  assert.deepEqual(json(paths.desktopJson()).mcpServers["api-anything"], SERVER);
+});
+
 test("setup adds the server to each agent's config, keeps every other entry, and backs each file up", async () => {
   const before = seed();
+  fakeExe("npx");
+  fakeExe("node");
   const r = await setup({ agents: [...ALL], share: true });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.deepEqual(
@@ -71,10 +101,12 @@ test("setup adds the server to each agent's config, keeps every other entry, and
   const claude = json(paths.claudeJson());
   assert.equal(claude.numStartups, 3);
   assert.deepEqual(claude.mcpServers, { other: { command: "other-mcp" }, "api-anything": SERVER });
+  // GUI apps start with a minimal PATH: the npx on PATH, by its absolute path, with node's directory
+  const gui = { command: join(bin, "npx"), args: SERVER.args, env: { PATH: `${bin}:/usr/bin:/bin` } };
   assert.deepEqual(json(paths.cursorJson()).mcpServers.cursorThing, { command: "x", args: ["y"] });
-  assert.deepEqual(json(paths.cursorJson()).mcpServers["api-anything"], SERVER);
+  assert.deepEqual(json(paths.cursorJson()).mcpServers["api-anything"], gui);
   assert.equal(json(paths.desktopJson()).theme, "dark");
-  assert.deepEqual(json(paths.desktopJson()).mcpServers["api-anything"], SERVER);
+  assert.deepEqual(json(paths.desktopJson()).mcpServers["api-anything"], gui);
   const toml = read(paths.codexToml());
   assert.ok(toml.startsWith(before.codex), "the old config.toml is kept as it was");
   assert.match(toml, /\[mcp_servers\.api-anything\]\ncommand = "npx"\nargs = \["-y", "api-anything", "mcp"\]\n$/);

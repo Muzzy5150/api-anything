@@ -22,6 +22,11 @@ it finds:
 | Cursor | `~/.cursor/mcp.json` `mcpServers` | none |
 | Claude Desktop | `claude_desktop_config.json` `mcpServers` (macOS: `~/Library/Application Support/Claude/`, Linux: `~/.config/Claude/`, Windows: `%APPDATA%\Claude\`) | none |
 
+Cursor and Claude Desktop are apps that start with a minimal PATH, where an `npx` from nvm or
+Homebrew is not found. For those two, the entry names npx by its absolute path (the one on setup's
+PATH, else the one beside the node running setup) and sets `"env": {"PATH": "<node's directory>:/usr/bin:/bin"}`
+so npx finds node. After a Node upgrade that moves npx, delete that entry and run setup again.
+
 - An `api-anything` entry that is already there is left as it is, even when it differs (an older
   `api-anything mcp` entry, or one with `--allow-writes`). Other entries are never changed.
 - A config file is copied to `<file>.bak-api-anything` before api-anything first edits it. An older
