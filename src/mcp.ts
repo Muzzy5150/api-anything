@@ -72,7 +72,11 @@ const pagesOf = (p: Paging) =>
 
 /** One param as JSON Schema: what call() accepts, so a client that validates refuses nothing call() would take. */
 function paramSchema(p: Param): JsonSchema {
-  const typed = (v: string) => (p.type === "number" && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v);
+  const typed = (v: string) => {
+    if (p.type === "number" && /^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+    if (p.type === "boolean" && (v === "true" || v === "false")) return v === "true";
+    return v;
+  };
   return {
     type: p.type,
     ...(p.description || p.hint ? { description: [p.description, p.hint].filter(Boolean).join("; format: ") } : {}),

@@ -352,16 +352,88 @@ test("MCP per-op tool names fit every client's limit and characters, and stay di
 test("MCP inputSchema keeps a number's enum as numbers, and an op with no params takes none", () => {
   const schema = inputSchema({
     params: [
-      { name: "n", type: "number", required: true, enum: ["1", "2"] },
-      { name: "flag", type: "boolean", required: false },
+      { name: "n", type: "number", required: true, enum: ["1", "2", "many"] },
+      { name: "both", type: "boolean", required: false, enum: ["true", "false"] },
+      { name: "yes", type: "boolean", required: false, enum: ["true"] },
+      { name: "no", type: "boolean", required: false, enum: ["false"] },
+      { name: "text", type: "string", required: false, enum: ["true", "false"] },
+      { name: "plain", type: "boolean", required: false },
+      { name: "invalid", type: "boolean", required: false, enum: ["true", "yes"] },
     ],
   } as unknown as Operation);
-  assert.deepEqual(schema.properties, { n: { type: "number", enum: [1, 2] }, flag: { type: "boolean" } });
+  assert.deepEqual(schema.properties, {
+    n: { type: "number", enum: [1, 2, "many"] },
+    both: { type: "boolean", enum: [true, false] },
+    yes: { type: "boolean", enum: [true] },
+    no: { type: "boolean", enum: [false] },
+    text: { type: "string", enum: ["true", "false"] },
+    plain: { type: "boolean" },
+    invalid: { type: "boolean", enum: [true, "yes"] },
+  });
   assert.deepEqual(inputSchema({ params: [] } as unknown as Operation), {
     type: "object",
     properties: {},
     additionalProperties: false,
   });
+});
+
+test("MCP advertises typed boolean enums through list_operations and a per-op tool without weakening calls", async () => {
+  const site = await localSite();
+  const s = await connect();
+  try {
+    saveSite(
+      parseSite({
+        name: "flags",
+        baseUrl: site.base,
+        operations: [
+          {
+            name: "read",
+            readOnly: true,
+            request: { method: "GET", url: `${site.base}/api/flags?enabled=true` },
+            slots: [{ param: "enabled", at: ["query:enabled"] }],
+            params: [
+              { name: "enabled", type: "boolean", enum: ["true", "false"] },
+              { name: "trueOnly", type: "boolean", required: false, enum: ["true"] },
+              { name: "falseOnly", type: "boolean", required: false, enum: ["false"] },
+              { name: "count", type: "number", required: false, enum: ["1", "2", "many"] },
+              { name: "mode", type: "string", required: false, enum: ["true", "false"] },
+              { name: "plain", type: "boolean", required: false },
+              { name: "invalid", type: "boolean", required: false, enum: ["yes"] },
+            ],
+            trigger: { url: `${site.base}/` },
+          },
+        ],
+      }),
+    );
+    await s.start({ sites: ["flags"] });
+    const listed = await s.tool("list_operations", { site: "flags" });
+    const listedSchema = listed.operations[0].inputSchema;
+    const { tools } = await s.client.listTools();
+    const toolSchema = tools.find((t) => t.name === "flags__read")!.inputSchema;
+    assert.deepEqual(toolSchema.properties, listedSchema.properties);
+    assert.deepEqual(listedSchema.properties, {
+      enabled: { type: "boolean", enum: [true, false] },
+      trueOnly: { type: "boolean", enum: [true] },
+      falseOnly: { type: "boolean", enum: [false] },
+      count: { type: "number", enum: [1, 2, "many"] },
+      mode: { type: "string", enum: ["true", "false"] },
+      plain: { type: "boolean" },
+      invalid: { type: "boolean", enum: ["yes"] },
+    });
+
+    assert.equal((await s.tool("flags__read", { enabled: true })).ok, true);
+    assert.equal((await s.tool("flags__read", { enabled: "false" })).ok, true);
+    const disallowed = await s.tool("flags__read", { enabled: true, falseOnly: true });
+    assert.deepEqual([disallowed.ok, disallowed.class], [false, "input"]);
+    assert.match(disallowed.reason, /one of "false"/);
+    const invalid = await s.tool("flags__read", { enabled: true, invalid: true });
+    assert.deepEqual([invalid.ok, invalid.class], [false, "input"]);
+    assert.match(invalid.reason, /one of "yes"/);
+    assert.equal(site.hits(), 2);
+  } finally {
+    await s.done();
+    site.close();
+  }
 });
 
 /** A call() that answers when `release` is called, counting how often it ran. */
