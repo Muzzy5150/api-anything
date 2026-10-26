@@ -28,6 +28,7 @@ import {
 } from "./heal.js";
 import { BadHeader, buildRequest, holdsRef, nextHop, RedirectRefused, type Sent, send, withDefaults } from "./http.js";
 import { reimportIfBrowser } from "./login.js";
+import { afterCall } from "./report.js";
 import { redact } from "./secrets.js";
 import {
   dropUnbound,
@@ -45,6 +46,7 @@ import {
   lastHealAt,
   loadSite,
   markStale,
+  type Resolved,
   rememberedTier,
   rememberTier,
   settleWrite,
@@ -584,7 +586,10 @@ async function onDrift(ctx: Ctx, site: Site, op: Operation, a: Attempt): Promise
   return fail(b, { reason: `${b.reason}; heal failed: ${h.reason}` });
 }
 
-function resolve(siteName: string, opName: string): { site: Site; op: Operation; theirs: boolean } | Result {
+function resolve(
+  siteName: string,
+  opName: string,
+): { site: Site; op: Operation; theirs: boolean; source: Resolved["source"] } | Result {
   let r: ReturnType<typeof loadSite>;
   try {
     r = loadSite(siteName);
@@ -616,7 +621,7 @@ function resolve(siteName: string, opName: string): { site: Site; op: Operation;
       next: `api-anything ops ${r.site.name}`,
     };
   // someone else's: pulled, bundled, or a heal's copy of a pulled one
-  return { site: r.site, op, theirs: r.source !== "user" || !!r.site.shared };
+  return { site: r.site, op, theirs: r.source !== "user" || !!r.site.shared, source: r.source };
 }
 
 /** The answer to a write the ledger held back: nothing is sent. */
@@ -671,7 +676,13 @@ export async function call(
     if (f.reason) f.reason = hide(f.reason, sessions, true);
     if (f.next) f.next = hide(f.next, sessions);
     if (ledger) settleWrite(ledger, f.write ?? "may_have_applied", f);
-    return { ...f, ms: Date.now() - t0 };
+    const out = { ...f, ms: Date.now() - t0 };
+    if (resolved && "source" in found)
+      afterCall(siteName, resolved, found.source, out, {
+        fetchImpl: opts.fetchImpl,
+        minIntervalMs: opts.minIntervalMs,
+      });
+    return out;
   };
   const found = resolve(siteName, opName);
   if ("ok" in found) return done(found);

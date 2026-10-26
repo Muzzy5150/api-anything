@@ -266,7 +266,8 @@ export function vetShared(site: Site, notes?: string): Vetted {
         errors.push(at(`${where} regex /${re}/ nests a quantifier in a quantified group`));
     }
   }
-  // `shared` is pull's own record (a hash), not the spec's content
-  warnings.push(...scanSecrets({ ...site, shared: undefined }, { cookies: [], values: {} }, allowed).warnings);
+  // `shared` and each op's `version` are this machine's records (hashes), not the spec's content
+  const content = { ...site, shared: undefined, operations: site.operations.map(({ version: _v, ...op }) => op) };
+  warnings.push(...scanSecrets(content, { cookies: [], values: {} }, allowed).warnings);
   return { errors, warnings };
 }

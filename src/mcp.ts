@@ -1,21 +1,23 @@
 /**
- * stdio MCP server with five fixed meta-tools, so the tool list costs the same at 2 sites or 200.
+ * stdio MCP server with a few fixed meta-tools, so the tool list costs the same at 2 sites or 200.
  * Writes are hidden from list_operations and refused by call_operation unless started with allowWrites.
- * It cannot learn operations (that is the CLI's capture/add), but it finds and pulls reviewed shared
- * specs, whose writes it never offers: page content may be steering the agent. For the same reason its
- * login cannot import cookies a human did not already choose to import.
+ * It finds and pulls shared specs from the registry, whose writes it never offers: page content may be
+ * steering the agent. For the same reason its login cannot import cookies a human did not already
+ * choose to import. Idle, it verifies a few candidates a day for the registry (background.ts).
  */
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { idleWork } from "./background.js";
 import { closeBrowser, login } from "./browser.js";
 import { call, type NextCall } from "./execute.js";
 import { returnedFields } from "./extract.js";
 import { profileDir } from "./heal.js";
 import { browserSource, cookieNames, importSession, loggedIn, resolveLoginTarget } from "./login.js";
 import { registerLearn } from "./mcp-learn.js";
-import { type IndexCache, type Pulled, pull, search } from "./registry.js";
+import { type Pulled, pull, search } from "./registry.js";
+import { settle } from "./report.js";
 import { loadSession, saveSession, sessionFile, withLock } from "./session.js";
 import { listSites, loadSite, siteNotes } from "./store.js";
 import { SHARED_NOTE } from "./vet.js";
@@ -108,6 +110,30 @@ const isWrite = (site: string, op: string) => {
   }
 };
 
+/**
+ * A site that is not installed, pulled for an agent (the `by: "agent"` mark: reads only). A name that
+ * does not load is left to the tool, which says why in its own fields.
+ */
+async function install(site: string): Promise<{ pulled?: Pulled } | { error: string; next: string; missing: boolean }> {
+  try {
+    if (loadSite(site)) return {};
+  } catch {
+    return {};
+  }
+  try {
+    return { pulled: await pull(site, { by: "agent" }) };
+  } catch (e) {
+    const missing = /^no shared spec/.test((e as Error).message);
+    return {
+      error: missing ? `no site "${site}", here or in the registry` : (e as Error).message,
+      next: missing
+        ? `find_sites {"query":"${site}"} with words or the site's domain; if nothing matches, learn it with learn_site`
+        : "do not try to get around this; tell the user the shared spec could not be used",
+      missing,
+    };
+  }
+}
+
 const reply = (v: unknown, isError = false) => ({
   content: [{ type: "text" as const, text: JSON.stringify(v) }],
   isError,
@@ -135,7 +161,6 @@ const guarded =
   };
 
 export function createServer({ allowWrites = false }: { allowWrites?: boolean } = {}): McpServer {
-  const indexCache: IndexCache = {};
   // without naming the sites up front, an agent asked "what does Goodreads rate X?" reaches for web search
   const server = new McpServer(
     { name: "api-anything", version: VERSION },
@@ -172,24 +197,25 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
     "find_sites",
     {
       description:
-        'Find websites someone already turned into operations: the shared registry and this machine\'s sites, best match first. query is words (what you need: "book ratings", "flight prices"), a domain or a URL. A match with installed false is fetched by list_operations on first use.',
+        'Find websites someone already turned into operations: the shared registry and this machine\'s sites, best match first, each op with its params and its status in the registry (live: confirmed by others; candidate: not yet). query is words (what you need: "book ratings", "flight prices"), a domain or a URL. Call an op with call_operation; a match with installed false is fetched on first use.',
       inputSchema: { query: z.string().describe("words, a domain or a URL") },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     guarded(async ({ query }: { query: string }) => {
-      const r = await search(query, { cache: indexCache });
+      const r = await search(query);
       const top = r.matches[0];
       return reply({
         matches: r.matches.map((m) => ({
           ...m,
-          operations: m.operations.filter((o) => !o.write).map((o) => o.op),
+          operations: m.operations.filter((o) => !o.write),
         })),
         ...(r.registryError ? { registryError: r.registryError } : {}),
         // bundled and pulled specs are someone else's too, installed or not
         ...(r.matches.length ? { shared: SHARED_NOTE } : {}),
         next: top
-          ? `list_operations {"site":"${top.site}"}`
-          : "nobody shared one yet: a new site is learned with the CLI (api-anything capture, then add), in your shell or by the user",
+          ? `call_operation {"site":"${top.site}","op":<an op above>,"args":<its params>}; list_operations {"site":"${top.site}"} first shows the site's notes (caveats, arg formats)`
+          : "nobody shared one yet: learn it with learn_site (the page that shows the data, example args and what you want from it)",
+        nextCall: top ? { tool: "call_operation", args: { site: top.site } } : { tool: "learn_site" },
       });
     }),
   );
@@ -203,23 +229,9 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     guarded(async ({ site }: { site: string }) => {
-      let pulled: Pulled | undefined;
-      if (!loadSite(site)) {
-        try {
-          pulled = await pull(site, { by: "agent" });
-        } catch (e) {
-          const missing = /^no shared spec/.test((e as Error).message);
-          return reply(
-            {
-              error: missing ? `no site "${site}", here or in the registry` : (e as Error).message,
-              next: missing
-                ? `find_sites {"query":"${site}"} with words or the site's domain; if nothing matches, a new site is learned with the CLI (api-anything capture, then add)`
-                : "do not try to get around this; tell the user the shared spec could not be used",
-            },
-            true,
-          );
-        }
-      }
+      const got = await install(site);
+      if ("error" in got) return reply(got, true);
+      const pulled = got.pulled;
       const r = loadSite(site)!;
       const writes = allowWrites && !agentPulled(r.site.name);
       const notes = siteNotes(r.site.name);
@@ -234,6 +246,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
             name: o.name,
             ...(o.description ? { description: o.description } : {}),
             ...(o.readOnly ? {} : { write: true }),
+            ...(o.version ? { status: o.version.status } : {}),
             ...(returnedFields(o.response) ? { returns: returnedFields(o.response) } : {}),
             params: o.params.map((p) => ({
               name: p.name,
@@ -297,6 +310,19 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
         again?: boolean;
         idempotencyKey?: string;
       }) => {
+        const got = await install(site);
+        if ("error" in got)
+          return reply(
+            {
+              ok: false,
+              class: got.missing ? "input" : "error",
+              reason: got.error,
+              next: got.next,
+              retry: got.missing ? "after_fix" : "no",
+              nextCall: got.missing ? { tool: "find_sites", args: { query: site } } : { action: "report" },
+            },
+            true,
+          );
         // an agent-pulled site is read-only here, whatever the server allows
         const writes = allowWrites && !agentPulled(site);
         if (allowWrites && !writes && isWrite(site, op))
@@ -412,7 +438,25 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
 }
 
 export async function serveStdio(opts: { allowWrites?: boolean } = {}): Promise<void> {
-  await createServer(opts).connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await createServer(opts).connect(transport);
+  // every message in or out is activity: background verification waits for a quiet minute
+  const idle = idleWork();
+  const handle = transport.onmessage;
+  transport.onmessage = (message) => {
+    idle.touch();
+    handle?.(message);
+  };
+  const send = transport.send.bind(transport);
+  transport.send = (message) => {
+    idle.touch();
+    return send(message);
+  };
   // An open Chrome keeps the process alive after the client goes away.
-  process.stdin.once("end", () => void closeBrowser().finally(() => process.exit(0)));
+  process.stdin.once("end", () => {
+    idle.stop();
+    void settle(1500)
+      .then(closeBrowser)
+      .finally(() => process.exit(0));
+  });
 }

@@ -167,6 +167,11 @@ export const OperationSchema = z.object({
    * two of its passing cases that differ only in these params answer differently.
    */
   unproven: z.object({ params: z.array(z.string()), reason: z.string() }).optional(),
+  /**
+   * The registry version this op is (its hash) and the status the registry gave it, set by `pull` and
+   * `shareOps`. This machine's record, like `learnedAt`: never uploaded, hashed or exported.
+   */
+  version: z.object({ hash: z.string(), status: z.string() }).optional(),
 });
 
 export const SiteSchema = z.object({

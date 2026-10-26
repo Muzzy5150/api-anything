@@ -42,9 +42,9 @@ const recordFile = (site: string) => join(home(), "checks", `${safeName(site)}.j
 export const loadRecord = (site: string): Record<string, OpRecord> =>
   readJson<Record<string, OpRecord>>(recordFile(site), {});
 
-/** The op's identity for its record: everything but when it was learned and the mark a verify clears. */
+/** The op's identity for its record: everything but when it was learned, the mark a verify clears and its registry version. */
 export function opHash(op: Operation): string {
-  const { learnedAt: _at, unproven: _u, ...rest } = op;
+  const { learnedAt: _at, unproven: _u, version: _v, ...rest } = op;
   return createHash("sha256").update(JSON.stringify(rest)).digest("hex").slice(0, 16);
 }
 
@@ -169,7 +169,7 @@ export async function verifySite(name: string, opts: CallOptions = {}): Promise<
 
 export interface Gate {
   errors: string[];
-  /** the record's cases for every op, current ones only, for the pull request */
+  /** the record's cases for every op, current ones only, for the publish preview */
   rows: { op: string; verified?: string; results: CaseResult[] }[];
 }
 
@@ -201,21 +201,4 @@ export function gate(site: Site): Gate {
     rows.push({ op: op.name, ...(current ? { verified: current.at } : {}), results: current?.results ?? [] });
   }
   return { errors, rows };
-}
-
-/** The gate's record as the pull request shows it: no reasons, which may quote the publisher's pages. */
-export function checksTable(rows: Gate["rows"]): string[] {
-  const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s+/g, " ").slice(0, 200);
-  return [
-    "| operation | case | expects | outcome |",
-    "|---|---|---|---|",
-    ...rows.flatMap((row) =>
-      row.results.length
-        ? row.results.map(
-            (r) =>
-              `| \`${cell(row.op)}\` | ${cell(label(r))}${r.purpose ? `: ${cell(r.purpose)}` : ""} | ${r.expect} | ${r.outcome}${r.outcome === "pass" ? "" : ` (${r.got})`} |`,
-          )
-        : [`| \`${cell(row.op)}\` | not verified | | |`],
-    ),
-  ];
 }

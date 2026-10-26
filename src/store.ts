@@ -381,9 +381,12 @@ export function exportSite(
   const r = loadSite(name);
   if (!r) throw new Error(`no site "${name}"`);
   const spec = structuredClone(r.site);
-  // where this copy was pulled from, and when an op was learned, are this machine's history
+  // where this copy was pulled from, when an op was learned and its registry version are this machine's history
   delete spec.shared;
-  for (const op of spec.operations) delete op.learnedAt;
+  for (const op of spec.operations) {
+    delete op.learnedAt;
+    delete op.version;
+  }
   const allowed = new Set<string>();
   const named: [string, string][] = [];
   const ips: string[] = [];

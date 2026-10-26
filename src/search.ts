@@ -105,7 +105,12 @@ export function domainOf(query: string): string | undefined {
  * How well an entry answers a query: a domain query matches the domains the spec uses; words weigh most in
  * the site's name, then its title and domains, then what its ops say they do and return.
  */
-export function score(e: IndexEntry, query: string): number {
+export function score(
+  e: Pick<IndexEntry, "site" | "displayName" | "description" | "domains"> & {
+    operations: { op: string; description?: string }[];
+  },
+  query: string,
+): number {
   const domain = domainOf(query);
   if (domain) return e.domains.includes(domain) ? 100 : 0;
   const name = words(e.site);
