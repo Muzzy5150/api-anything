@@ -209,16 +209,24 @@ export const putReport = (db: D1Database, r: ReportRow) =>
 export const touchOk = (db: D1Database, hash: string, key: string, at: string) =>
   db.prepare("UPDATE versions SET last_ok_at = ? WHERE hash = ? AND uploader <> ?").bind(at, hash, key);
 
-export async function facts(db: D1Database, v: VersionRow, since: string, window: number): Promise<Facts> {
+/** What the recent reports on `v` say; `weekAgo` bounds the ok networks degradation weighs failures against. */
+export async function facts(
+  db: D1Database,
+  v: VersionRow,
+  since: string,
+  window: number,
+  weekAgo: string,
+): Promise<Facts> {
   const counts = await db
     .prepare(
       `SELECT COALESCE(SUM(outcome = 'ok' AND key <> ?), 0) AS okKeys,
         COUNT(DISTINCT CASE WHEN outcome = 'ok' AND key <> ? THEN network END) AS okNetworks,
-        COALESCE(SUM(outcome = 'wrong'), 0) AS wrongKeys
+        COALESCE(SUM(outcome = 'wrong'), 0) AS wrongKeys,
+        COUNT(DISTINCT CASE WHEN outcome = 'ok' AND at >= ? THEN network END) AS weekOkNetworks
       FROM reports WHERE hash = ? AND at >= ?`,
     )
-    .bind(v.uploader, v.uploader, v.hash, since)
-    .first<{ okKeys: number; okNetworks: number; wrongKeys: number }>();
+    .bind(v.uploader, v.uploader, weekAgo, v.hash, since)
+    .first<{ okKeys: number; okNetworks: number; wrongKeys: number; weekOkNetworks: number }>();
   const latest = await db
     .prepare(
       `SELECT outcome, network FROM reports WHERE hash = ? AND at >= ? AND outcome IN (${ABOUT_OP.map(() => "?").join(", ")}) ORDER BY at DESC LIMIT ?`,
@@ -233,6 +241,7 @@ export async function facts(db: D1Database, v: VersionRow, since: string, window
     heal: v.heal === 1,
     latest: latest.results.map((r) => r.outcome),
     failedNetworks: new Set(failed.map((r) => r.network)).size,
+    weekOkNetworks: counts?.weekOkNetworks ?? 0,
   };
 }
 
@@ -260,8 +269,8 @@ export async function servable(db: D1Database, since: string, viewer?: string, s
 
 /**
  * Candidates this key neither uploaded nor reported, oldest first: only those served (no live version of
- * the op shadows them), that plain HTTP can call (minTier 1). On a site with no live op, only one some
- * install on another network than the uploader's already reported ok (it found the site by itself), so a
+ * the op shadows them), that plain HTTP can call (minTier 1). On a site with no live op, only one installs
+ * on 2 networks other than the uploader's already reported ok (they found the site by themselves), so a
  * stranger's fresh site cannot point every verifying install at a host it watches.
  */
 export async function unverified(db: D1Database, key: string, limit: number) {
@@ -274,8 +283,8 @@ export async function unverified(db: D1Database, key: string, limit: number) {
           AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.hash = v.hash AND r.key = ?)
           AND NOT EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.op_name = v.op_name AND l.status = 'live')
           AND (EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.status = 'live')
-            OR EXISTS (SELECT 1 FROM reports r WHERE r.hash = v.hash AND r.outcome = 'ok' AND r.key <> v.uploader
-              AND r.network <> COALESCE(v.uploader_network, '')))
+            OR (SELECT COUNT(DISTINCT r.network) FROM reports r WHERE r.hash = v.hash AND r.outcome = 'ok'
+              AND r.key <> v.uploader AND r.network <> COALESCE(v.uploader_network, '')) >= 2)
         ORDER BY v.created_at LIMIT ?`,
       )
       .bind(key, key, limit)
@@ -309,6 +318,20 @@ export async function siteOps(
     .first();
   return { opNames: rows.map((r) => r.op_name), loginOp: rows.some((r) => r.login === 1), established: !!established };
 }
+
+/**
+ * The match signature of an op's incumbent: of its live and degraded versions, the one live the longest.
+ * Degraded counts, so degrading the incumbent first does not move the reference.
+ */
+export const incumbentSig = async (db: D1Database, site: string, op: string) =>
+  (
+    await db
+      .prepare(
+        "SELECT sig FROM versions WHERE site = ? AND op_name = ? AND status IN ('live', 'degraded') ORDER BY live_since IS NULL, live_since LIMIT 1",
+      )
+      .bind(site, op)
+      .first<{ sig: string }>()
+  )?.sig;
 
 /** Whether `key`'s latest report on `hash` is a fail made since `since`. */
 export const failedOn = async (db: D1Database, hash: string, key: string, since: string) =>

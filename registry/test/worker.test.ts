@@ -448,8 +448,8 @@ describe("maintenance by the crowd", () => {
   });
 
   test("verify-jobs: candidates this key neither uploaded nor reported, with example args", async () => {
-    // three installs promote, so two oks leave a candidate a candidate
-    const { env } = registry({ PROMOTE_KEYS: "3" });
+    // four installs promote, so three oks leave a candidate a candidate
+    const { env } = registry({ PROMOTE_KEYS: "4" });
     const me = install();
     const other = install();
     const mk = (name: string, over: Record<string, unknown> = {}) =>
@@ -500,8 +500,11 @@ describe("maintenance by the crowd", () => {
     // the uploader's own friends on its network found nothing
     await report(env, install(), fresh.body.hash, "ok", NET1);
     assert.deepEqual(await jobs(), [want]);
-    // an install on another network found it by itself, and it worked: now the crowd checks it
+    // one other network is one VPS away
     await report(env, install(), fresh.body.hash, "ok", NET2);
+    assert.deepEqual(await jobs(), [want]);
+    // installs on two other networks found it by themselves, and it worked: now the crowd checks it
+    await report(env, install(), fresh.body.hash, "ok", "100.64.7.1");
     assert.deepEqual((await jobs()).map((j: { site: string }) => j.site).sort(), ["example-com", "example-net"]);
     assert.equal((await send(env, "GET", "/v1/verify-jobs")).status, 401);
   });

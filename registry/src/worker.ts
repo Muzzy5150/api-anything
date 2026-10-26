@@ -19,6 +19,7 @@ import {
   getKey,
   getSite,
   getVersion,
+  incumbentSig,
   putReport,
   reseed,
   seedSite,
@@ -177,7 +178,8 @@ async function newKeyLimit(c: Ctx, key: string) {
 
 /** Applies what the version's reports now say to its status. */
 async function recompute(c: Ctx, v: VersionRow): Promise<Status> {
-  const status = nextStatus(v.status, await facts(c.env.DB, v, c.since, c.t.degradeWindow), c.t);
+  const weekAgo = new Date(c.now - 7 * DAY).toISOString();
+  const status = nextStatus(v.status, await facts(c.env.DB, v, c.since, c.t.degradeWindow, weekAgo), c.t);
   if (status !== v.status) await setStatus(c.env.DB, v.hash, status, new Date(c.now).toISOString());
   return status;
 }
@@ -273,10 +275,12 @@ async function upload(c: Ctx) {
 
   const ops = await siteOps(db, u.site.name, u.site.domain);
   const loginCookies = bound?.login_cookies ? (JSON.parse(bound.login_cookies) as string[]).length > 0 : false;
+  const incumbent = await incumbentSig(db, u.site.name, u.operation.name);
   const reasons = reviewReasons(u.site, u.operation, u.evidence, {
     opNames: ops.opNames,
     login: loginCookies || ops.loginOp,
     established: ops.established,
+    ...(incumbent ? { incumbentSig: incumbent } : {}),
   });
   const heal = await isHeal(c, u.evidence.healedFrom, u.site.name, u.operation.name, key);
   const status: Status = reasons.length ? "review" : "candidate";

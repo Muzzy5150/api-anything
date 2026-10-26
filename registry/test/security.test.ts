@@ -234,6 +234,46 @@ describe("takeover of a live op", () => {
     for (const ip of ["100.64.1.1", "100.64.2.1", "100.64.3.1"]) await report(env, install(), live.hash, "fail", ip);
     assert.equal((await served()).hash, up.body.hash);
   });
+
+  test("a version of an established op with another match is review, even once the incumbent degrades", async () => {
+    const { env, raw } = registry();
+    const li = { name: "linkedin", domain: "example.com", baseUrl: "https://www.example.com" };
+    const at = (path: string, description = "Search people") =>
+      op({
+        name: "search",
+        description,
+        request: { method: "GET", url: `https://www.example.com${path}?q=dune`, headers: {} },
+        match: { host: "www.example.com", path },
+      });
+    const live = (await seed(env, { site: li, operations: [at("/api/search")] })).body.operations[0];
+    const close = await uploaded(env, upload({ site: li, operation: at("/psettings/close-account", "ATTACKER") }));
+    assert.equal(close.status, "review");
+    assert.ok(
+      close.reasons?.some((x) => /match .*close-account.* differs from the live version's .*\/api\/search/.test(x)),
+      JSON.stringify(close),
+    );
+    // a heal keeps its match: a candidate as before
+    const heal = at("/api/search", "Search people, repaired");
+    assert.equal((await uploaded(env, upload({ site: li, operation: heal }))).status, "candidate");
+    // degrading the incumbent first moves nothing
+    raw.prepare("UPDATE versions SET status = 'degraded' WHERE hash = ?").run(live.hash);
+    const again = await uploaded(env, upload({ site: li, operation: at("/psettings/close-account", "ATTACKER 2") }));
+    assert.equal(again.status, "review");
+  });
+});
+
+describe("degrading a busy op", () => {
+  test("failing networks must outnumber the networks it worked on this week", async () => {
+    const { env } = registry();
+    const live = (await seed(env, { site, operations: [op()] })).body.operations[0];
+    const status = async () => (await send(env, "GET", "/v1/sites/example-com")).body.operations[0].status;
+    for (let i = 1; i <= 3; i++) await report(env, install(), live.hash, "ok", `198.18.${i}.1`);
+    // five failing installs of eight, on three networks: every other rule holds, but no more networks failed than worked
+    for (const n of [1, 1, 2, 2, 3]) await report(env, install(), live.hash, "fail", `100.64.${n}.1`);
+    assert.equal(await status(), "live", "3 failing networks against 3 that worked");
+    await report(env, install(), live.hash, "fail", "100.64.4.1");
+    assert.equal(await status(), "degraded", "4 against 3");
+  });
 });
 
 describe("search poisoning", () => {

@@ -11,6 +11,7 @@ const facts = (f: Partial<Facts> = {}): Facts => ({
   heal: false,
   latest: [],
   failedNetworks: 3,
+  weekOkNetworks: 0,
   ...f,
 });
 
@@ -46,6 +47,10 @@ test("degradation needs more than half failing, at least 3 installs, on at least
     degraded(facts({ latest: ["fail", "fail", "fail"], failedNetworks: 2 }), thresholds({ DEGRADE_MIN_NETWORKS: "2" })),
     true,
   );
+  // a busy op: the failing networks must outnumber those it worked on this week
+  const many = facts({ latest: ["fail", "fail", "fail", "fail"], failedNetworks: 4 });
+  assert.equal(degraded({ ...many, weekOkNetworks: 4 }, t), false);
+  assert.equal(degraded({ ...many, weekOkNetworks: 3 }, t), true);
   assert.equal(degraded(facts({ latest: ["fail", "fail"] }), t), false);
   assert.equal(degraded(facts({ latest: ["fail", "wrong", "fail", "ok", "ok", "ok"] }), t), false);
   assert.equal(degraded(facts({ latest: ["fail", "wrong", "fail", "ok", "ok"] }), t), true);

@@ -63,6 +63,8 @@ export interface Facts {
   latest: Outcome[];
   /** distinct networks among the fail and wrong outcomes in `latest` */
   failedNetworks: number;
+  /** distinct networks whose latest outcome on it in the last 7 days is ok, the uploader's included */
+  weekOkNetworks: number;
 }
 
 /** Outcomes that say something about the op; auth, rate, blocked, input and error say nothing. */
@@ -76,10 +78,19 @@ export function promoted(f: Facts, t: Thresholds): boolean {
   return f.okKeys - 2 * f.wrongKeys >= keys && f.okNetworks >= networks;
 }
 
-/** Failing for most recent installs, at least `degradeMinFailed` of them, on `degradeMinNetworks` networks: fresh keys on one network are cheap. */
+/**
+ * Failing for most recent installs, at least `degradeMinFailed` of them, on `degradeMinNetworks` networks
+ * (fresh keys on one network are cheap), and on more networks than it worked on this week: an op with real
+ * traffic is not degraded by a handful of VPSes.
+ */
 export function degraded(f: Facts, t: Thresholds): boolean {
   const failed = f.latest.filter((o) => o === "fail" || o === "wrong").length;
-  return failed * 2 > f.latest.length && failed >= t.degradeMinFailed && f.failedNetworks >= t.degradeMinNetworks;
+  return (
+    failed * 2 > f.latest.length &&
+    failed >= t.degradeMinFailed &&
+    f.failedNetworks >= t.degradeMinNetworks &&
+    f.failedNetworks > f.weekOkNetworks
+  );
 }
 
 /** The status reports give a version. review, archived and blocked are left to a maintainer and the archive job. */

@@ -138,6 +138,8 @@ export interface SiteHeld {
   login: boolean;
   /** some site on its domain has a live or seeded op */
   established: boolean;
+  /** the match signature (`matchSig`) of the op's incumbent: its live or degraded version live the longest */
+  incumbentSig?: string;
 }
 
 /** Why a version is outside the automatic rules: served to its uploader only until a maintainer decides. */
@@ -162,6 +164,11 @@ export function reviewReasons(
   if (newOp && (held.login || site.loginCookies?.length)) reasons.push(`a new op on a site with a login: ${op.name}`);
   // callers trust an established site: a maintainer approves what it newly does (x.com "follow")
   else if (newOp && held.established) reasons.push(`a new op on an established site: ${op.name}`);
+  // a heal keeps its match, built from stable identity only; a new endpoint under an old name (linkedin
+  // search turned into /psettings/close-account) is a new op wearing a trusted name
+  const sig = matchSig(op);
+  if (!newOp && held.established && held.incumbentSig && sig !== held.incumbentSig)
+    reasons.push(`its match ${sig} differs from the live version's ${held.incumbentSig}`);
   if (op.public?.length) reasons.push(`lists public values: ${op.public.join(", ")}`);
   // blocked: a bot wall answered the cookie-free replay, so the data is public behind it
   if (evidence.cleanReplay !== "ok" && evidence.cleanReplay !== "blocked")

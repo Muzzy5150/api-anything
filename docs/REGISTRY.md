@@ -120,10 +120,12 @@ or unique-local address, every redirect hop included. A job is a candidate that:
 - is served: no live version of its op name shadows it;
 - runs at `minTier` 1, over plain HTTP;
 - has published examples for every required param;
-- belongs to a site that already has a live op, or has an ok report from an install on a network other
-  than the uploader's. That install found it by itself, through a domain search or a re-learn with the
-  same hash. A stranger's fresh site never sends every verifying install to a host it watches, which
-  would harvest their IP addresses.
+- belongs to a site that already has a live op, or has ok reports from installs on 2 distinct networks
+  other than the uploader's. Those installs found it by themselves, through a domain search or a
+  re-learn with the same hash. A stranger's fresh site never sends every verifying install to a host it
+  watches, which would harvest their IP addresses. With the default thresholds such a candidate is
+  usually promoted by those same reports, so in practice a new site's ops are checked by the installs
+  that find it, not by background jobs.
 
 Only public reads are promoted by reports. A version is `review`, served to its uploader only until a
 maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
@@ -137,6 +139,11 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
   trust an established site, so a maintainer approves what it newly does (an x.com `follow`). The check
   is by domain, so a second name for the same domain gets around nothing. A new version of an op the
   site already has is no new op;
+- on such a site, has a match (method, host, path, GraphQL operationName) other than the op's
+  incumbent's: of its live and degraded versions, the one live the longest. A real heal keeps its match,
+  since the match is built only from the request's stable identity. A version that turns linkedin
+  `search` into a GET of `/psettings/close-account` is never served without a maintainer. Degrading
+  the incumbent first changes nothing, since a degraded version still counts;
 - sends to or opens a host off its site, or lists `public` names;
 - holds something the export secret scan flags.
 
@@ -144,9 +151,11 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
 
 - Every call is a health check. A live version is **degraded** when, among the last 10 reports from
   distinct installs (`DEGRADE_WINDOW`), more than half are `fail` or `wrong`, at least 3 installs
-  failed (`DEGRADE_MIN_FAILED`), and those failures come from at least 3 distinct networks
-  (`DEGRADE_MIN_NETWORKS`): fresh keys on one network are cheap. Then the next best version is served.
-  `auth`, `rate`, `blocked` and `input` say nothing about the op.
+  failed (`DEGRADE_MIN_FAILED`), those failures come from at least 3 distinct networks
+  (`DEGRADE_MIN_NETWORKS`), and the failing networks outnumber the networks whose latest report on it in
+  the last 7 days is ok. Fresh keys on one network are cheap, and a handful of VPSes cannot degrade an op
+  with real traffic. Then the next best version is served. `auth`, `rate`, `blocked` and `input` say
+  nothing about the op.
 - The client already heals an op that drifted. A healed public op uploads automatically as a new
   version with `parent` and `evidence.healedFrom`. Its own failed call of the old version makes it a
   heal (above), so the client sends that `fail` report before the upload.
@@ -189,11 +198,18 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
 What these rules leave open:
 
 - A lookalike domain is its own site. Whoever registers github-xyz.com can share `github-xyz-com`, and
-  ok reports from installs on 2 networks promote it. Word search finds it only once it is live, and its
-  title is only its domain, but no rule tells a lookalike from a real site.
+  ok reports from installs on 2 networks promote it. Its title is only its domain, but its description
+  is the uploader's own. Once it is live, that description ranks for words like any other site's
+  ("amazon prices" finds amazon-deals.net next to amazon). No registry rule tells a lookalike from a
+  real site. The defence is the agent's: every match carries `domain`, and the agent checks it against
+  the site the user meant before calling.
+- An op with no ok report from any network in the last 7 days (a seed nobody calls) can be degraded by
+  failures from 3 networks. A version with the same match, promoted by 2 networks, is then served. A
+  version with a different match still goes to review.
 - The edge cache holds a public read for up to 60 s, so a maintainer's block takes up to a minute to
   disappear from search, site and index answers.
-- An uploaded site `description` and op descriptions are the uploader's words, shown on its page.
+- An uploaded site `description` and op descriptions are the uploader's words, shown on its page and
+  read by agents as data, never as instructions.
 
 ## What the registry stores
 
