@@ -15,6 +15,8 @@ person's agent doesn't have to learn it. Every call reports whether the operatio
 the agents that use an operation also check it, and an operation that breaks is repaired by the
 next agent that meets the failure.
 
+Browse what's shared: [the catalog](https://api-anything-registry.forth-site.workers.dev).
+
 [![Two agents race on the same Google Flights task: one drives Chrome, one calls API Anything](docs/media/agent-race.gif)](docs/media/agent-race.mp4)
 
 <sub>Same agent (Claude Opus 5.5), same prompt, started together. Left: it drives headless Chrome
@@ -72,7 +74,8 @@ builds the request template without an LLM.
 With sharing on, this is what leaves your machine:
 
 - **Operations learned from public pages.** An operation is shared automatically only when it is a
-  read, it was learned signed out, and the replay with no cookies worked. Its stored example is the
+  read, it was learned signed out, and the replay with no cookies answered (with the data, or with
+  a bot wall such as Anubis or Cloudflare, which each caller's browser passes on its own). Its stored example is the
   agent's second value and its check is the third, never what you asked. Cookies and tokens are
   references in an operation (`cookie:name`), never their values, and a spec holding a live
   credential is refused before it is saved.

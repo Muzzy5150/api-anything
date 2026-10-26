@@ -186,6 +186,16 @@ describe("uploads", () => {
     }
   });
 
+  test("a clean replay a bot wall answered counts as public: the data is behind the wall, not behind a login", async () => {
+    const { env } = registry();
+    const r = await send(env, "POST", "/v1/versions", {
+      as: install(),
+      body: upload({ evidence: { ...evidence, cleanReplay: "blocked" } }),
+    });
+    assert.equal(r.status, 201, r.text);
+    assert.equal(r.body.status, "candidate", r.text);
+  });
+
   test("a client's own `version` record does not change the hash", async () => {
     const { env } = registry();
     const a = await send(env, "POST", "/v1/versions", { as: install(), body: upload() });

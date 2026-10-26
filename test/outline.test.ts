@@ -105,3 +105,15 @@ test("scout: values only an icon's aria-label carries, and a detail page's repea
     "Fiction",
   ]);
 });
+
+test("scout: a link classed as the link names its text title and its href url, without microformat prefixes", () => {
+  const item = (n: number) =>
+    `<li class="story"><a class="u-url" href="https://ex.com/${n}">Story number ${n} about dune</a><span class="p-author">al${n}</span><time class="dt-published">2026-01-0${n}</time></li>`;
+  const page = `<html><body><ol>${[1, 2, 3, 4].map(item).join("")}</ol></body></html>`;
+  const o = outline("text/html", page, ["dune"]);
+  assert.ok(o?.list, JSON.stringify(o));
+  const names = Object.keys(o.list.fields);
+  assert.ok(names.includes("title") && names.includes("url"), names.join(", "));
+  assert.ok(names.includes("author") && names.includes("published"), names.join(", "));
+  assert.ok(!names.some((n) => /UrlUrl|^u[A-Z]/.test(n)), names.join(", "));
+});

@@ -426,3 +426,12 @@ test("an extract ending in [*] returns the items: the learned shape is compared 
   });
   assert.equal(cls(nested, json(200, { results: [{ a: "x", b: 1, c: true }] })), "ok");
 });
+
+test("blocked: an Anubis proof-of-work page, even at 200 and on an html op whose items it lacks", () => {
+  const page = `<!doctype html><html><head><title>Making sure you&#39;re not a bot!</title>
+<script id="anubis-main" defer type="module" src="/.within.website/x/cmd/anubis/static/js/main.mjs"></script></head>
+<body><p>Anubis is a compromise.</p></body></html>`;
+  const htmlOp = op({ response: { format: "html", html: { items: "li.story", fields: { title: "a" } } } });
+  assert.equal(cls(htmlOp, html(200, page)), "blocked");
+  assert.equal(cls(htmlOp, html(200, "<title>Making sure you're not a bot!</title>")), "blocked");
+});

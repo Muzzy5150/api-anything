@@ -91,6 +91,22 @@ test("shareOps: a public read goes automatically, signed, and the local op recor
   assert.equal(uploads()[0]!.verified, true, "signed, and the signature verifies");
 });
 
+test("shareOps: a read whose clean replay met a bot wall is public too, and goes automatically", async () => {
+  shareOn();
+  saveSite(site());
+  const [out] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "blocked" } });
+  assert.equal(out!.shared, true, JSON.stringify(out));
+  assert.equal(fake.uploads()[0]!.evidence.cleanReplay, "blocked");
+});
+
+test("shareOps: a public read's check args do not hold back its automatic share; they stay listed", async () => {
+  shareOn();
+  saveSite(site({ checks: [{ args: { q: "kittens" }, expect: "result" }] }));
+  const [out] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
+  assert.equal(out!.shared, true, JSON.stringify(out));
+  assert.match(out!.personal!.join("\n"), /checks\[0\] sends q=kittens/);
+});
+
 test("shareOps: anything that is not a public read waits for the user's yes", async () => {
   shareOn();
   const cases: [string, Site, Record<string, unknown>][] = [

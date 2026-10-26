@@ -28,7 +28,7 @@ const UploadSchema = z.object({
   evidence: z.object({
     clientVersion: z.string().max(100),
     learnedLoggedIn: z.boolean(),
-    cleanReplay: z.enum(["ok", "failed", "skipped"]),
+    cleanReplay: z.enum(["ok", "blocked", "failed", "skipped"]),
     holdout: z.object({ args: z.record(z.string(), z.unknown()), ok: z.boolean(), tier: Tier.optional() }).optional(),
     tier: Tier.optional(),
     healedFrom: HASH.optional(),
@@ -103,7 +103,9 @@ export function reviewReasons(site: SiteContext, op: Operation, evidence: Eviden
   if (op.learnedLoggedIn || evidence.learnedLoggedIn) reasons.push("learned while signed in");
   if (!op.readOnly) reasons.push("a write");
   if (op.public?.length) reasons.push(`lists public values: ${op.public.join(", ")}`);
-  if (evidence.cleanReplay !== "ok") reasons.push(`its clean replay was ${evidence.cleanReplay}, not ok`);
+  // blocked: a bot wall answered the cookie-free replay, so the data is public behind it
+  if (evidence.cleanReplay !== "ok" && evidence.cleanReplay !== "blocked")
+    reasons.push(`its clean replay was ${evidence.cleanReplay}, not ok`);
   // the export scan's heuristics: a JWT, a bearer, a long blob; they misfire, so a maintainer looks
   const spec = SiteSchema.parse({ name: site.name, baseUrl: site.baseUrl, operations: [op] });
   for (const w of vetShared(spec).warnings) if (w.startsWith("$")) reasons.push(w);

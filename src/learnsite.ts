@@ -421,7 +421,11 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
   // a minTier 3 op needs the page for every call: plain HTTP says nothing about whether it is public
   const clean =
     now.minTier > 1 ? undefined : await cleanCall(now, input.args2, { site, minIntervalMs: o.minIntervalMs });
-  const cleanReplay: Evidence["cleanReplay"] = !clean ? "skipped" : clean.class === "ok" ? "ok" : "failed";
+  const cleanReplay: Evidence["cleanReplay"] = !clean
+    ? "skipped"
+    : clean.class === "ok" || clean.class === "blocked"
+      ? clean.class
+      : "failed";
 
   const proof: NonNullable<LearnSiteResult["proof"]> = {
     holdout: {

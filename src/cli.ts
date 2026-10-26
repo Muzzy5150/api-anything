@@ -765,6 +765,14 @@ async function cmdCall({ v, pos }: Parsed): Promise<number> {
     base = json(v.json, z.record(z.string(), z.unknown()), "json") ?? {};
   }
   const args = { ...base, ...kv(rest) };
+  // A shared site this machine lacks is fetched first, as MCP does: an agent with a shell finds it by name.
+  // It is marked as an agent's pull, so MCP keeps its writes hidden until a human runs pull.
+  let pulled = false;
+  try {
+    if (!loadSite(site)) pulled = !!(await pull(site, { by: "agent" }));
+  } catch {
+    // not shared, or refused: call() answers "no site" with its next step
+  }
   if (v.dry) {
     const { site: s } = requireSite(site);
     const op = s.operations.find((o) => o.name === name);
@@ -775,7 +783,7 @@ async function cmdCall({ v, pos }: Parsed): Promise<number> {
       cookies: real.cookies.map((c) => ({ ...c, value: `<${c.name}>` })),
       values: Object.fromEntries(Object.keys(real.values).map((k) => [k, `<${k}>`])),
     };
-    out({ ok: true, dry: true, request: buildRequest(op, args, redacted) });
+    out({ ok: true, dry: true, request: buildRequest(op, args, redacted), ...(pulled ? { pulled: site } : {}) });
     return 0;
   }
   const maxTier = v["max-tier"] ? (Number(v["max-tier"]) as Tier) : undefined;
@@ -785,7 +793,7 @@ async function cmdCall({ v, pos }: Parsed): Promise<number> {
     idempotencyKey: v["idempotency-key"],
     maxTier,
   });
-  out(r);
+  out(pulled ? { ...r, pulled: site } : r);
   if (!r.ok) process.stderr.write(`next: ${r.next}\n`);
   return r.ok ? 0 : 1;
 }

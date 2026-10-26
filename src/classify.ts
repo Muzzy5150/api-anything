@@ -50,6 +50,8 @@ const CHALLENGES: [string, RegExp | undefined, RegExp?][] = [
   ],
   ["Amazon", /automated access to Amazon data|\/errors\/validateCaptcha/i],
   ["Imperva", /Incapsula incident/i, /_Incapsula_Resource/i],
+  // the open-source proof-of-work wall many small sites put in front of scrapers
+  ["Anubis", /<script id="anubis-main"|Making sure you(?:'|&#39;)re not a bot!/i],
   ["Kasada", undefined, /\/[0-9a-f]{8}-[0-9a-f-]{27}\/[0-9a-f]{8}-[0-9a-f-]{27}\/ips\.js/i],
   // a proof-of-work page that solves itself and resubmits (Reddit)
   ["JS challenge", /name=["']?js_challenge|[?&]js_challenge=1/i],

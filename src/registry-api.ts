@@ -39,8 +39,12 @@ export interface SiteContext {
 export interface Evidence {
   clientVersion: string;
   learnedLoggedIn: boolean;
-  /** the op replayed with no cookies and no session values at all: ok means it is public */
-  cleanReplay: "ok" | "failed" | "skipped";
+  /**
+   * the op replayed with no cookies and no session values at all. ok: it is public. blocked: a bot wall
+   * answered (an Anubis or Cloudflare page): public data behind a wall, which each caller's browser tier
+   * passes on its own, so it counts as public too.
+   */
+  cleanReplay: "ok" | "blocked" | "failed" | "skipped";
   /** a call with args used as neither example */
   holdout?: { args: Record<string, unknown>; ok: boolean; tier?: 1 | 2 | 3 };
   /** the tier the uploader's own successful calls answered at */

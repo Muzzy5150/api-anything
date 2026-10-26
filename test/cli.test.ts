@@ -1079,3 +1079,49 @@ describe("capture on a page with a reCAPTCHA frame from another site", {
     );
   });
 });
+
+test("call fetches a shared site this machine lacks, marked as an agent's pull, before it calls", async () => {
+  const { startRegistry, served } = await import("./fixture/registry.js");
+  const { parseSite } = await import("../src/spec.js");
+  const reg = await startRegistry();
+  const home = mkdtempSync(join(tmpdir(), "api-anything-cli-pull-"));
+  try {
+    reg.sites.set(
+      "shelf",
+      served(
+        parseSite({
+          name: "shelf",
+          baseUrl: "https://www.shelf.example.net",
+          operations: [
+            {
+              name: "search",
+              request: { method: "GET", url: "https://www.shelf.example.net/api/search?q=dune", headers: {} },
+              slots: [{ param: "q", at: ["query:q"] }],
+              params: [{ name: "q", example: "dune" }],
+              trigger: { url: "https://www.shelf.example.net/search?q={q}" },
+              match: { host: "www.shelf.example.net", path: "/api/search" },
+              response: { extract: "hits" },
+              readOnly: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const r = await new Promise<{ code: number; stdout: string }>((resolve) =>
+      execFile(
+        process.execPath,
+        ["--import", "tsx", CLI, "call", "shelf", "search", "q=kittens", "--dry"],
+        { cwd: ROOT, env: { ...process.env, API_ANYTHING_HOME: home, API_ANYTHING_REGISTRY: reg.url } },
+        (err, stdout) => resolve({ code: err ? Number(err.code ?? 1) : 0, stdout }),
+      ),
+    );
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.pulled, "shelf", r.stdout);
+    assert.equal(out.request.url, "https://www.shelf.example.net/api/search?q=kittens");
+    const saved = JSON.parse(readFileSync(join(home, "registry", "shelf.json"), "utf8"));
+    assert.equal(saved.shared.by, "agent");
+  } finally {
+    await reg.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

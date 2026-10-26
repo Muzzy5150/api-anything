@@ -51,11 +51,15 @@ export async function shareOps(
       out.push({ ...base, shared: false, reason: `refused: ${op.errors.join("; ")}` });
       continue;
     }
-    if (!o.consent && !(op.public && share && !op.personal.length)) {
+    // A check's args are values learn_site's agent chose (the user's own refuse the share there) or the
+    // registry's own: they hold the user back only from what needs consent. An email, an id, an IP or a
+    // literal typed into the page does hold an automatic share back.
+    const holding = op.personal.filter((x) => !/\.checks\[\d+\] sends /.test(x));
+    if (!o.consent && !(op.public && share && !holding.length)) {
       out.push({
         ...base,
         shared: false,
-        ...(op.public && !op.personal.length
+        ...(op.public && !holding.length
           ? { reason: "sharing is off in settings (api-anything setup asks)" }
           : {
               needsConsent: true,
@@ -125,9 +129,9 @@ export async function healBack(
   const args = examplesOf(op);
   if (!args) return undefined;
   const clean = await cleanCall(op, args, { site, fetchImpl: o.fetchImpl, minIntervalMs: o.minIntervalMs });
-  if (clean.class !== "ok") return undefined;
+  if (clean.class !== "ok" && clean.class !== "blocked") return undefined;
   const [shared] = await shareOps(site, [opName], {
-    evidence: { cleanReplay: "ok", healedFrom: parent },
+    evidence: { cleanReplay: clean.class, healedFrom: parent },
     parent,
     signal: o.signal,
   });

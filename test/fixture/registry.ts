@@ -78,7 +78,10 @@ export async function startRegistry() {
     hang: false,
     /** how POST /v1/versions answers an upload; by default new, candidate for a public read, else review */
     onUpload: (u: VersionUpload): { status: number; body: UploadResult | { error: string; reasons?: string[] } } => {
-      const pub = u.evidence.cleanReplay === "ok" && u.operation.readOnly && !u.evidence.learnedLoggedIn;
+      const pub =
+        (u.evidence.cleanReplay === "ok" || u.evidence.cleanReplay === "blocked") &&
+        u.operation.readOnly &&
+        !u.evidence.learnedLoggedIn;
       return {
         status: 201,
         body: {

@@ -89,7 +89,7 @@ const hostsOfOp = (op: Operation) => [
 export function isPublic(site: Site, op: Operation, evidence: Partial<Evidence>): boolean {
   const own = siteOf(new URL(site.baseUrl).hostname);
   return (
-    evidence.cleanReplay === "ok" &&
+    (evidence.cleanReplay === "ok" || evidence.cleanReplay === "blocked") &&
     !op.learnedLoggedIn &&
     !evidence.learnedLoggedIn &&
     op.readOnly &&
