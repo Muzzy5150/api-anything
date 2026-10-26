@@ -14,6 +14,7 @@ import { call, type NextCall } from "./execute.js";
 import { returnedFields } from "./extract.js";
 import { profileDir } from "./heal.js";
 import { browserSource, cookieNames, importSession, loggedIn, resolveLoginTarget } from "./login.js";
+import { registerLearn } from "./mcp-learn.js";
 import { type IndexCache, type Pulled, pull, search } from "./registry.js";
 import { loadSession, saveSession, sessionFile, withLock } from "./session.js";
 import { listSites, loadSite, siteNotes } from "./store.js";
@@ -406,6 +407,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
       });
     }),
   );
+  registerLearn(server, { allowWrites });
   return server;
 }
 
