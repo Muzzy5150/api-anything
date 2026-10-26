@@ -356,7 +356,7 @@ test("MCP --sites registers each op as a tool of its own, with its schema and a 
 test("MCP per-op tool names fit every client's limit and characters, and stay distinct when cut", () => {
   const op = (name: string) => ({ name }) as Pick<Operation, "name">;
   assert.equal(toolName("hacker-news", op("search")), "hacker-news__search");
-  assert.match(toolName("hn.demo", op("links")), /^hn_demo__links_[0-9a-f]{8}$/);
+  assert.match(toolName("hn.demo", op("links")), /^_hn_demo__links_[0-9a-f]{8}$/);
   assert.notEqual(toolName("hn.demo", op("links")), toolName("hn_demo", op("links")));
   assert.notEqual(toolName("a", op("b__c")), toolName("a__b", op("c")));
   assert.notEqual(toolName("a_", op("b")), toolName("a", op("_b")));
