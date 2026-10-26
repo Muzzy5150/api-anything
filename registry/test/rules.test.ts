@@ -10,6 +10,7 @@ const facts = (f: Partial<Facts> = {}): Facts => ({
   wrongKeys: 0,
   heal: false,
   latest: [],
+  failedNetworks: 3,
   ...f,
 });
 
@@ -36,7 +37,15 @@ test("promotion, a heal, and wrong outweighing oks", () => {
   assert.equal(promoted(facts({ okKeys: 4, okNetworks: 2, wrongKeys: 1 }), t), true);
 });
 
-test("degradation needs more than half failing and at least 3 installs", () => {
+test("degradation needs more than half failing, at least 3 installs, on at least 3 networks", () => {
+  assert.equal(t.degradeMinNetworks, 3);
+  // fresh keys on one or two networks are cheap
+  assert.equal(degraded(facts({ latest: ["fail", "fail", "fail"], failedNetworks: 2 }), t), false);
+  assert.equal(nextStatus("live", facts({ latest: ["fail", "fail", "fail", "fail"], failedNetworks: 1 }), t), "live");
+  assert.equal(
+    degraded(facts({ latest: ["fail", "fail", "fail"], failedNetworks: 2 }), thresholds({ DEGRADE_MIN_NETWORKS: "2" })),
+    true,
+  );
   assert.equal(degraded(facts({ latest: ["fail", "fail"] }), t), false);
   assert.equal(degraded(facts({ latest: ["fail", "wrong", "fail", "ok", "ok", "ok"] }), t), false);
   assert.equal(degraded(facts({ latest: ["fail", "wrong", "fail", "ok", "ok"] }), t), true);
@@ -66,6 +75,22 @@ test("rank: live, candidate, degraded; then success rate; then confirmations", (
       ["degraded", 1, 0],
     ],
   );
+});
+
+test("rank: of two live versions the incumbent wins, whatever the rates", () => {
+  const live = (liveSince: string, successRate: number, confirmations: number) => ({
+    status: "live" as const,
+    liveSince,
+    successRate,
+    confirmations,
+    createdAt: liveSince,
+  });
+  const incumbent = live("2026-01-01", 0.6, 2);
+  const newcomer = live("2026-05-01", 1, 40);
+  assert.deepEqual([newcomer, incumbent].sort(byRank), [incumbent, newcomer]);
+  // a degraded incumbent gives way
+  const dipped = { ...incumbent, status: "degraded" as const };
+  assert.deepEqual([dipped, newcomer].sort(byRank), [newcomer, dipped]);
 });
 
 test("an IP's network is its /24 or /32", () => {

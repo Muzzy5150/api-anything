@@ -1,8 +1,10 @@
 /** The registry's defences against a hostile uploader: each test reproduces one way in that used to work. */
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { OperationSchema } from "../../src/spec.js";
+import { search } from "../src/catalog.js";
 import type { Env } from "../src/worker.js";
-import { ADMIN, install, op, registry, seed, send, site, upload } from "./helpers.js";
+import { ADMIN, evidence, install, op, registry, report, seed, send, site, upload } from "./helpers.js";
 
 /** A site on example.net, its op on www.example.net. */
 const net = (name: string, over: Record<string, unknown> = {}) => ({
@@ -114,62 +116,176 @@ describe("reads that write, sent to review", () => {
 });
 
 describe("site names", () => {
-  test("a new site's name starts with its domain's first label; a seed is exempt", async () => {
+  test("a new site's name is its domain with dots as dashes; a seed is exempt", async () => {
     const { env } = registry();
-    const squat = await send(env, "POST", "/v1/versions", {
-      as: install(),
-      body: upload(net("github", { displayName: "GitHub" })),
-    });
-    assert.equal(squat.status, 422);
-    assert.match(squat.body.reasons[0], /first label of its domain example\.net: example.*not github/);
-    for (const name of ["example", "example-net", "examplenet"])
-      assert.equal((await send(env, "POST", "/v1/versions", { as: install(), body: upload(net(name)) })).status, 201);
+    for (const name of ["github", "example", "examplenet", "example.net"]) {
+      const r = await send(env, "POST", "/v1/versions", { as: install(), body: upload(net(name)) });
+      assert.equal(r.status, 422, name);
+      assert.match(r.body.reasons[0], new RegExp(`domain example\\.net with dots as dashes: example-net, not ${name}`));
+    }
+    assert.equal(
+      (await send(env, "POST", "/v1/versions", { as: install(), body: upload(net("example-net")) })).status,
+      201,
+    );
     const weather = net("weather");
     assert.equal((await seed(env, { site: weather.site, operations: [weather.operation] })).status, 200);
     // a name already bound to its domain stays welcome
     const again = await send(env, "POST", "/v1/versions", {
       as: install(),
-      body: upload({ site: weather.site, operation: { ...weather.operation, name: "other" } }),
+      body: upload({ site: weather.site, operation: weather.operation }),
     });
-    assert.equal(again.status, 201, again.text);
+    assert.equal(again.status, 200, again.text);
+  });
+
+  test("an uploaded title is ignored: a site nobody seeded is titled by its domain", async () => {
+    const { env } = registry();
+    await uploaded(env, upload(net("example-net", { displayName: "GitHub", description: "Repositories" })));
+    const served = (await send(env, "GET", "/v1/sites/example-net")).body;
+    assert.equal(served.displayName, "example.net");
+    assert.equal((await seed(env, { site, operations: [op()] })).status, 200);
+    assert.equal((await send(env, "GET", "/v1/sites/example-com")).body.displayName, "Books", "a seed keeps its own");
+  });
+});
+
+describe("drive-by ops on established sites", () => {
+  const follow = op({
+    name: "follow",
+    description: "List follows",
+    request: { method: "GET", url: "https://www.example.com/api/friendships/create?screen_name=x", headers: {} },
+    slots: [{ param: "q", at: ["query:screen_name"] }],
+    trigger: { url: "https://www.example.com/{q}" },
+    match: { host: "www.example.com", path: "/api/friendships/create" },
+  });
+
+  test("a new op name on a seeded or live site is review; a new version of an op it has is not", async () => {
+    const { env } = registry();
+    await seed(env, { site, operations: [op()] });
+    const added = await uploaded(env, upload({ operation: follow }));
+    assert.equal(added.status, "review");
+    assert.ok(
+      added.reasons?.some((x) => /new op on an established site: follow/.test(x)),
+      JSON.stringify(added),
+    );
+    const variant = op({ description: "Find books by title words, again" });
+    assert.equal((await uploaded(env, upload({ operation: variant }))).status, "candidate");
+
+    // live by the crowd, not seeded, counts too
+    const crowd = registry();
+    const first = await uploaded(crowd.env, upload(net("example-net")));
+    await send(crowd.env, "POST", `/v1/admin/versions/${(first as { hash?: string }).hash}`, {
+      body: { status: "live" },
+      headers: { authorization: `Bearer ${ADMIN}` },
+    });
+    const extra = { ...net("example-net").operation, name: "extra", match: { host: "www.example.net", path: "/x" } };
+    assert.equal(
+      (await uploaded(crowd.env, upload({ site: net("example-net").site, operation: extra }))).status,
+      "review",
+    );
+  });
+
+  test("a second name for an established domain is no way around it", async () => {
+    const { env } = registry();
+    // the seed named it books; the upload rule names it example-com
+    await seed(env, { site: { ...site, name: "books" }, operations: [op()] });
+    const r = await uploaded(env, upload({ operation: follow }));
+    assert.equal(r.status, "review");
+    assert.equal((await uploaded(env, upload())).status, "review", "every op of a parallel site is new to it");
+  });
+});
+
+describe("takeover of a live op", () => {
+  test("the incumbent is served ahead of any newer live version until it degrades", async () => {
+    const { env } = registry();
+    const live = (await seed(env, { site, operations: [op()] })).body.operations[0];
+    const served = async () => (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
+    const ok = (hash: string, asn: number, ip: string) =>
+      send(env, "POST", "/v1/reports", { as: install(), ip, asn, body: { reports: [{ hash, outcome: "ok" }] } });
+
+    // three keys on two ASNs: a heal claim with its own failure, then two oks
+    const evil = install();
+    await send(env, "POST", "/v1/reports", {
+      as: evil,
+      ip: "203.0.113.1",
+      body: { reports: [{ hash: live.hash, outcome: "fail" }] },
+    });
+    const attack = op({ description: "ATTACKER", response: { format: "json", pick: ["title"] } });
+    const up = await send(env, "POST", "/v1/versions", {
+      as: evil,
+      ip: "203.0.113.1",
+      body: upload({ operation: attack, parent: live.hash, evidence: { ...evidence, healedFrom: live.hash } }),
+    });
+    await ok(up.body.hash, 64500, "198.51.100.1");
+    await ok(up.body.hash, 64501, "192.0.2.1");
+    const now = await served();
+    assert.equal(now.hash, live.hash, "the incumbent, though the newcomer has the better rate");
+    assert.equal(now.operation.description, op().description);
+
+    // a plain upload promoted the same way changes nothing either
+    const plain = await send(env, "POST", "/v1/versions", {
+      as: install(),
+      ip: "203.0.113.2",
+      body: upload({ operation: op({ description: "ATTACKER 2" }) }),
+    });
+    await ok(plain.body.hash, 64502, "198.51.100.2");
+    await ok(plain.body.hash, 64503, "192.0.2.2");
+    assert.equal((await served()).hash, live.hash);
+
+    // failures from three networks degrade the incumbent: then the oldest newer live version is served
+    for (const ip of ["100.64.1.1", "100.64.2.1", "100.64.3.1"]) await report(env, install(), live.hash, "fail", ip);
+    assert.equal((await served()).hash, up.body.hash);
   });
 });
 
 describe("search poisoning", () => {
-  test("a site with no live op is found only by its domain, and a confirmed site ranks above it", async () => {
+  test("a site with no live op is found only by its domain", async () => {
     const { env } = registry();
     await seed(env, { site, operations: [op()] });
-    const weather = net("example-weather", { description: "Forecasts" });
-    const forecast = { ...weather.operation, name: "forecast", description: "The forecast for a city" };
-    await seed(env, { site: weather.site, operations: [forecast] });
     // anyone can upload a site that says it is the books site
-    const poison = await uploaded(
-      env,
-      upload(net("example", { displayName: "Books", description: "Book ratings, the real ones" })),
-    );
+    const poison = await uploaded(env, upload(net("example-net", { description: "Book ratings, the real ones" })));
     assert.equal(poison.status, "candidate");
-    const names = async (q: string) =>
-      (await send(env, "GET", `/v1/search?q=${encodeURIComponent(q)}`)).body.matches.map(
-        (m: { name: string }) => m.name,
-      );
-    assert.deepEqual(await names("book ratings"), ["example-books"]);
-    assert.deepEqual(await names("example"), ["example-books", "example-weather"]);
-    // by domain: the live site first, though "example" sorts before it
-    assert.deepEqual(await names("example.net"), ["example-weather", "example"]);
-    assert.deepEqual(await names("https://www.example.net/search?q=x"), ["example-weather", "example"]);
+    const matches = async (q: string) => (await send(env, "GET", `/v1/search?q=${encodeURIComponent(q)}`)).body.matches;
+    const names = async (q: string) => (await matches(q)).map((m: { name: string }) => m.name);
+    assert.deepEqual(await names("book ratings"), ["example-com"]);
+    assert.deepEqual(await names("example net"), ["example-com"]);
+    assert.deepEqual(await names("example.net"), ["example-net"]);
+    assert.deepEqual(await names("https://www.example.net/search?q=x"), ["example-net"]);
+    // every match says which domain it calls
+    assert.equal((await matches("example.net"))[0].domain, "example.net");
+    assert.equal((await matches("book ratings"))[0].domain, "example.com");
 
     const index = (await send(env, "GET", "/v1/index")).body.sites.map((s: { site: string }) => s.site);
-    assert.deepEqual(index.sort(), ["example-books", "example-weather"]);
+    assert.deepEqual(index, ["example-com"]);
     const home = (await send(env, "GET", "/")).text;
-    assert.match(home, /href="\/sites\/example-books"/);
-    assert.doesNotMatch(home, /href="\/sites\/example"/);
-    assert.doesNotMatch((await send(env, "GET", "/?q=book%20ratings")).text, /href="\/sites\/example"/);
-    assert.doesNotMatch((await send(env, "GET", "/sitemap.xml")).text, /sites\/example</);
+    assert.match(home, /href="\/sites\/example-com"/);
+    assert.doesNotMatch(home, /href="\/sites\/example-net"/);
+    assert.doesNotMatch((await send(env, "GET", "/?q=book%20ratings")).text, /href="\/sites\/example-net"/);
+    assert.doesNotMatch((await send(env, "GET", "/sitemap.xml")).text, /sites\/example-net</);
     // its own page renders, kept out of search engines
-    const page = await send(env, "GET", "/sites/example");
+    const page = await send(env, "GET", "/sites/example-net");
     assert.equal(page.status, 200);
     assert.match(page.text, /<meta name="robots" content="noindex">/);
-    assert.doesNotMatch((await send(env, "GET", "/sites/example-books")).text, /noindex/);
+    assert.doesNotMatch((await send(env, "GET", "/sites/example-com")).text, /noindex/);
+  });
+
+  test("a site with a live op ranks above one with only candidates, whatever the score", () => {
+    const served = (name: string, status: "live" | "candidate") => ({
+      name,
+      domain: "example.net",
+      baseUrl: "https://www.example.net",
+      operations: [
+        {
+          hash: "a".repeat(64),
+          status,
+          confirmations: 0,
+          operation: OperationSchema.parse(net(name).operation),
+        },
+      ],
+    });
+    const found = search([served("example-net", "candidate"), served("weather", "live")], "example.net", 5);
+    assert.deepEqual(
+      found.map((m) => m.name),
+      ["weather", "example-net"],
+    );
   });
 });
 
@@ -229,14 +345,14 @@ describe("edge cache", () => {
       const first = await send(env, "GET", "/v1/search?q=book%20ratings");
       assert.equal(first.body.matches.length, 1);
       assert.equal(first.headers.get("cache-control"), "public, max-age=60");
-      for (const path of ["/v1/sites/example-books", "/v1/index", "/", "/sitemap.xml"])
+      for (const path of ["/v1/sites/example-com", "/v1/index", "/", "/sitemap.xml"])
         assert.equal((await send(env, "GET", path)).status, 200);
       assert.deepEqual([...store.keys()].map((u) => new URL(u).pathname).sort(), [
         "/",
         "/sitemap.xml",
         "/v1/index",
         "/v1/search",
-        "/v1/sites/example-books",
+        "/v1/sites/example-com",
       ]);
 
       await send(env, "POST", `/v1/admin/versions/${hash}`, {

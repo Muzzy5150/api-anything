@@ -23,11 +23,15 @@ export type Outcome = "ok" | "fail" | "wrong" | "auth" | "blocked" | "rate" | "i
 
 /** What a site is, shared by all its operations. A site's name is bound to its domain by the first upload. */
 export interface SiteContext {
-  /** the site's short name, as `safeName` allows: goodreads, google-flights */
+  /**
+   * the site's short name, as `safeName` allows. A new site's is its domain with dots as dashes
+   * (crates-io); a maintainer's seed may pick another (goodreads, google-flights)
+   */
   name: string;
   /** the registrable domain of baseUrl (`siteOf`); the server computes it and refuses a mismatch */
   domain: string;
   baseUrl: string;
+  /** a seed's title; the server stores the domain as the title of any other site */
   displayName?: string;
   description?: string;
   loginCookies?: string[];

@@ -23,14 +23,14 @@ const servedOp = (r: StatRow): ServedOp => {
  * search and top), and a site must never serve two ops of one name.
  */
 export function bestPerOp(rows: StatRow[]): ServedOp[] {
-  const groups = new Map<string, ServedOp & { createdAt: string }>();
+  const groups = new Map<string, ServedOp & { createdAt: string; liveSince?: string }>();
   for (const r of rows) {
-    const op = { ...servedOp(r), createdAt: r.created_at };
+    const op = { ...servedOp(r), createdAt: r.created_at, ...(r.live_since ? { liveSince: r.live_since } : {}) };
     const held = groups.get(r.op_name);
     if (!held || byRank(op, held) < 0) groups.set(r.op_name, op);
   }
   return [...groups.values()]
-    .map(({ createdAt: _, ...op }) => op)
+    .map(({ createdAt: _, liveSince: __, ...op }) => op)
     .sort((a, b) => a.operation.name.localeCompare(b.operation.name));
 }
 

@@ -271,15 +271,17 @@ async function upload(c: Ctx) {
     return json({ hash: u.hash, status, duplicate: true, ...(reasons ? { reasons } : {}) } satisfies UploadResult);
   }
 
-  const ops = await siteOps(db, u.site.name);
+  const ops = await siteOps(db, u.site.name, u.site.domain);
   const loginCookies = bound?.login_cookies ? (JSON.parse(bound.login_cookies) as string[]).length > 0 : false;
   const reasons = reviewReasons(u.site, u.operation, u.evidence, {
     opNames: ops.opNames,
     login: loginCookies || ops.loginOp,
+    established: ops.established,
   });
   const heal = await isHeal(c, u.evidence.healedFrom, u.site.name, u.operation.name, key);
   const status: Status = reasons.length ? "review" : "candidate";
-  await addSite(db, u.site, key, now);
+  // an uploaded title could claim any brand: a site nobody seeded is titled by its domain
+  await addSite(db, { ...u.site, displayName: u.site.domain }, key, now);
   await addVersion(
     db,
     {
@@ -292,6 +294,7 @@ async function upload(c: Ctx) {
       status,
       reasons,
       uploader: key,
+      uploaderNetwork: network,
       evidence: u.evidence,
     },
     now,

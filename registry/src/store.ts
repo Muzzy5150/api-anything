@@ -37,6 +37,10 @@ export interface VersionRow {
   heal: number;
   created_at: string;
   last_ok_at: string | null;
+  /** when it first became live: the incumbent of an op is the live version with the earliest */
+  live_since: string | null;
+  /** the uploader's network hash, as reports store it */
+  uploader_network: string | null;
 }
 
 /** A version with what its recent reports say. */
@@ -116,13 +120,15 @@ export interface NewVersion {
   status: Status;
   reasons: string[];
   uploader: string;
+  /** the uploader's network hash; a seed has none */
+  uploaderNetwork?: string;
   evidence: Evidence;
 }
 
 export const addVersion = (db: D1Database, v: NewVersion, now: string) =>
   db
     .prepare(
-      "INSERT INTO versions (hash, site, op_name, sig, operation, parent, heal, status, reasons, uploader, evidence, created_at, updated_at, last_ok_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO versions (hash, site, op_name, sig, operation, parent, heal, status, reasons, uploader, evidence, created_at, updated_at, last_ok_at, live_since, uploader_network) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       v.hash,
@@ -139,19 +145,27 @@ export const addVersion = (db: D1Database, v: NewVersion, now: string) =>
       now,
       now,
       null,
+      v.status === "live" ? now : null,
+      v.uploaderNetwork ?? null,
     )
     .run();
 
+/** Sets a status; the first time a version goes live is kept, so an incumbent stays one through a dip. */
 export const setStatus = (db: D1Database, hash: string, status: Status, now: string) =>
-  db.prepare("UPDATE versions SET status = ?, updated_at = ? WHERE hash = ?").bind(status, now, hash).run();
+  db
+    .prepare(
+      "UPDATE versions SET status = ?, updated_at = ?, live_since = CASE WHEN ? = 'live' THEN COALESCE(live_since, ?) ELSE live_since END WHERE hash = ?",
+    )
+    .bind(status, now, status, now, hash)
+    .run();
 
 /** A seed's version is live from now; a blocked one stays blocked. */
 export const reseed = (db: D1Database, hash: string, now: string) =>
   db
     .prepare(
-      "UPDATE versions SET status = CASE WHEN status = 'blocked' THEN status ELSE 'live' END, updated_at = ? WHERE hash = ?",
+      "UPDATE versions SET status = CASE WHEN status = 'blocked' THEN status ELSE 'live' END, live_since = CASE WHEN status = 'blocked' THEN live_since ELSE COALESCE(live_since, ?) END, updated_at = ? WHERE hash = ?",
     )
-    .bind(now, hash)
+    .bind(now, now, hash)
     .run();
 
 /** The seed's earlier versions of a site that this seed no longer has: replaced. */
@@ -207,16 +221,18 @@ export async function facts(db: D1Database, v: VersionRow, since: string, window
     .first<{ okKeys: number; okNetworks: number; wrongKeys: number }>();
   const latest = await db
     .prepare(
-      `SELECT outcome FROM reports WHERE hash = ? AND at >= ? AND outcome IN (${ABOUT_OP.map(() => "?").join(", ")}) ORDER BY at DESC LIMIT ?`,
+      `SELECT outcome, network FROM reports WHERE hash = ? AND at >= ? AND outcome IN (${ABOUT_OP.map(() => "?").join(", ")}) ORDER BY at DESC LIMIT ?`,
     )
     .bind(v.hash, since, ...ABOUT_OP, window)
-    .all<{ outcome: Outcome }>();
+    .all<{ outcome: Outcome; network: string }>();
+  const failed = latest.results.filter((r) => r.outcome === "fail" || r.outcome === "wrong");
   return {
     okKeys: counts?.okKeys ?? 0,
     okNetworks: counts?.okNetworks ?? 0,
     wrongKeys: counts?.wrongKeys ?? 0,
     heal: v.heal === 1,
     latest: latest.results.map((r) => r.outcome),
+    failedNetworks: new Set(failed.map((r) => r.network)).size,
   };
 }
 
@@ -244,7 +260,8 @@ export async function servable(db: D1Database, since: string, viewer?: string, s
 
 /**
  * Candidates this key neither uploaded nor reported, oldest first: only those served (no live version of
- * the op shadows them), that plain HTTP can call (minTier 1), on a site that already has a live op, so a
+ * the op shadows them), that plain HTTP can call (minTier 1). On a site with no live op, only one some
+ * install on another network than the uploader's already reported ok (it found the site by itself), so a
  * stranger's fresh site cannot point every verifying install at a host it watches.
  */
 export async function unverified(db: D1Database, key: string, limit: number) {
@@ -256,7 +273,9 @@ export async function unverified(db: D1Database, key: string, limit: number) {
           AND COALESCE(json_extract(v.operation, '$.minTier'), 1) = 1
           AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.hash = v.hash AND r.key = ?)
           AND NOT EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.op_name = v.op_name AND l.status = 'live')
-          AND EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.status = 'live')
+          AND (EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.status = 'live')
+            OR EXISTS (SELECT 1 FROM reports r WHERE r.hash = v.hash AND r.outcome = 'ok' AND r.key <> v.uploader
+              AND r.network <> COALESCE(v.uploader_network, '')))
         ORDER BY v.created_at LIMIT ?`,
       )
       .bind(key, key, limit)
@@ -264,8 +283,16 @@ export async function unverified(db: D1Database, key: string, limit: number) {
   ).results;
 }
 
-/** The op names a site's versions have, and whether any of them was learned signed in. */
-export async function siteOps(db: D1Database, site: string): Promise<{ opNames: string[]; loginOp: boolean }> {
+/**
+ * The op names a site's versions have; whether any was learned signed in; and whether its domain is
+ * established: some site on it has a live or seeded op. By domain, so a second name for x.com is no way
+ * around the review of new ops on x.
+ */
+export async function siteOps(
+  db: D1Database,
+  site: string,
+  domain: string,
+): Promise<{ opNames: string[]; loginOp: boolean; established: boolean }> {
   const rows = (
     await db
       .prepare(
@@ -274,7 +301,13 @@ export async function siteOps(db: D1Database, site: string): Promise<{ opNames: 
       .bind(site)
       .all<{ op_name: string; login: number }>()
   ).results;
-  return { opNames: rows.map((r) => r.op_name), loginOp: rows.some((r) => r.login === 1) };
+  const established = await db
+    .prepare(
+      "SELECT 1 AS x FROM versions v JOIN sites s ON s.name = v.site WHERE s.domain = ? AND (v.status = 'live' OR v.uploader = 'seed') LIMIT 1",
+    )
+    .bind(domain)
+    .first();
+  return { opNames: rows.map((r) => r.op_name), loginOp: rows.some((r) => r.login === 1), established: !!established };
 }
 
 /** Whether `key`'s latest report on `hash` is a fail made since `since`. */

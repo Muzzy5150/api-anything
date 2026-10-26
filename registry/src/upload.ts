@@ -95,11 +95,14 @@ function offSite(op: Operation, domain: string): string[] {
   return [...new Set(hosts.filter((h) => siteOf(h) !== domain))];
 }
 
-/** Why a new site may not take this name: it must start with its domain's first label (amazon for amazon.com). */
+/** The only name a new site may take: its registrable domain with dots as dashes (crates.io: crates-io). */
+export const nameOf = (domain: string) => domain.replace(/\./g, "-");
+
+/** Why a new site may not take this name. Unique by construction: no site can take another's brand. */
 export function nameRefusal(name: string, domain: string): string | undefined {
-  const label = domain.split(".")[0] ?? domain;
-  if (name.startsWith(label)) return undefined;
-  return `a new site's name starts with the first label of its domain ${domain}: ${label}, or ${label}-something; not ${name}`;
+  const want = nameOf(domain);
+  if (name === want) return undefined;
+  return `a new site's name is its domain ${domain} with dots as dashes: ${want}, not ${name}`;
 }
 
 /** The GraphQL documents a JSON or GraphQL body carries at `query`. */
@@ -133,6 +136,8 @@ export interface SiteHeld {
   opNames: string[];
   /** the site lists login cookies or has an op learned while signed in */
   login: boolean;
+  /** some site on its domain has a live or seeded op */
+  established: boolean;
 }
 
 /** Why a version is outside the automatic rules: served to its uploader only until a maintainer decides. */
@@ -140,7 +145,7 @@ export function reviewReasons(
   site: SiteContext,
   op: Operation,
   evidence: Evidence,
-  held: SiteHeld = { opNames: [], login: false },
+  held: SiteHeld = { opNames: [], login: false, established: false },
 ): string[] {
   const reasons: string[] = [];
   const off = offSite(op, site.domain);
@@ -153,8 +158,10 @@ export function reviewReasons(
     reasons.push(`a read sent as ${method}${method === "POST" ? ", not a GraphQL query" : ""}`);
   const refs = [...new Set(op.slots.flatMap((s) => (s.ref ? [s.ref] : [])))];
   if (refs.length) reasons.push(`sends the caller's own ${refs.join(", ")}`);
-  if ((held.login || site.loginCookies?.length) && !held.opNames.includes(op.name))
-    reasons.push(`a new op on a site with a login: ${op.name}`);
+  const newOp = !held.opNames.includes(op.name);
+  if (newOp && (held.login || site.loginCookies?.length)) reasons.push(`a new op on a site with a login: ${op.name}`);
+  // callers trust an established site: a maintainer approves what it newly does (x.com "follow")
+  else if (newOp && held.established) reasons.push(`a new op on an established site: ${op.name}`);
   if (op.public?.length) reasons.push(`lists public values: ${op.public.join(", ")}`);
   // blocked: a bot wall answered the cookie-free replay, so the data is public behind it
   if (evidence.cleanReplay !== "ok" && evidence.cleanReplay !== "blocked")

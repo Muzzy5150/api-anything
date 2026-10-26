@@ -15,6 +15,8 @@ export interface Thresholds {
   degradeWindow: number;
   /** installs among those that must have failed */
   degradeMinFailed: number;
+  /** distinct networks those failed installs must span */
+  degradeMinNetworks: number;
   /** reports older than this count for nothing; a version with no ok in it is archived */
   recentDays: number;
   uploadsPerHour: number;
@@ -38,6 +40,7 @@ export function thresholds(env: object): Thresholds {
     promoteHealKeys: n("PROMOTE_HEAL_KEYS", 1),
     degradeWindow: n("DEGRADE_WINDOW", 10),
     degradeMinFailed: n("DEGRADE_MIN_FAILED", 3),
+    degradeMinNetworks: n("DEGRADE_MIN_NETWORKS", 3),
     recentDays: n("RECENT_DAYS", 30),
     uploadsPerHour: n("UPLOADS_PER_HOUR", 30),
     reportsPerHour: n("REPORTS_PER_HOUR", 2000),
@@ -58,6 +61,8 @@ export interface Facts {
   heal: boolean;
   /** the latest ok/fail/wrong outcomes of distinct installs, newest first, at most `degradeWindow` */
   latest: Outcome[];
+  /** distinct networks among the fail and wrong outcomes in `latest` */
+  failedNetworks: number;
 }
 
 /** Outcomes that say something about the op; auth, rate, blocked, input and error say nothing. */
@@ -71,9 +76,10 @@ export function promoted(f: Facts, t: Thresholds): boolean {
   return f.okKeys - 2 * f.wrongKeys >= keys && f.okNetworks >= networks;
 }
 
+/** Failing for most recent installs, at least `degradeMinFailed` of them, on `degradeMinNetworks` networks: fresh keys on one network are cheap. */
 export function degraded(f: Facts, t: Thresholds): boolean {
   const failed = f.latest.filter((o) => o === "fail" || o === "wrong").length;
-  return failed * 2 > f.latest.length && failed >= t.degradeMinFailed;
+  return failed * 2 > f.latest.length && failed >= t.degradeMinFailed && f.failedNetworks >= t.degradeMinNetworks;
 }
 
 /** The status reports give a version. review, archived and blocked are left to a maintainer and the archive job. */
@@ -94,15 +100,24 @@ export interface Rankable {
   successRate?: number;
   confirmations: number;
   createdAt: string;
+  /** when it first became live (live_since) */
+  liveSince?: string;
 }
 
 // review is served only to its uploader, who ranks it as a candidate
 const ORDER: Partial<Record<Status, number>> = { live: 0, candidate: 1, review: 1, degraded: 2 };
 
-/** Best first: live, candidate, degraded; then success rate (none ranks below any); then confirmations; then newest. */
+/**
+ * Best first: live, candidate, degraded. Of two live versions the incumbent, live the longest, wins whatever
+ * the rates: a newer live version may be a takeover by a few keys, so it is served only once the incumbent
+ * degrades. Otherwise success rate (none ranks below any), then confirmations, then newest.
+ */
 export function byRank(a: Rankable, b: Rankable): number {
+  const incumbent =
+    a.status === "live" && b.status === "live" ? (a.liveSince ?? "~").localeCompare(b.liveSince ?? "~") : 0;
   return (
     (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) ||
+    incumbent ||
     (b.successRate ?? -1) - (a.successRate ?? -1) ||
     b.confirmations - a.confirmations ||
     b.createdAt.localeCompare(a.createdAt)

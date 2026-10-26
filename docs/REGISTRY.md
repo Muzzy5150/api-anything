@@ -70,9 +70,9 @@ web server does, and does not store it.
    learn_site's holdout and none of the user's own `<site>.md` notes: a check recorded with
    `api-anything check`, or notes the user wrote, go only with their yes (`publish --yes`). A pulled
    site's notes came from the registry and go back with its heal.
-5. A new site's name must start with the first label of its registrable domain (`crates`, `crates-io`
-   or `crates.io` for crates.io; `lobsters` for lobste.rs). `learn_site`'s default name does (the host,
-   else the registrable domain), and a given `site` that does not is refused before anything runs.
+5. A new site's name is its registrable domain with dots turned into dashes: `crates-io` for crates.io,
+   `lobste-rs` for lobste.rs (Trust, below). A site already shared under another name (a seed's
+   `goodreads`) keeps that name.
 
 ## Verification by the crowd
 
@@ -92,6 +92,11 @@ Otherwise anyone could name a live hash and take its op over with one friend. A 
 networks than a new op, so with the defaults it needs as many installs as one too. It needs fewer only
 where `PROMOTE_KEYS` is set above `PROMOTE_NETWORKS`.
 
+Promotion does not decide what is served. Of the live versions of an op, the **incumbent** (the one live
+the longest) is served while it is not degraded, whatever the success rates and confirmations. A newer
+live version, a heal included, is served only once the incumbent degrades. A few keys on two networks
+can promote a version, but they cannot replace one callers already rely on.
+
 Background verification makes the long tail move: an MCP server idle for a minute asks
 `GET /v1/verify-jobs` for candidates and calls each with its published examples, plain HTTP only, no
 cookies, at most 20 a day, and reports the outcome. The calls go from the user's machine and IP address,
@@ -102,8 +107,10 @@ or unique-local address, every redirect hop included. A job is a candidate that:
 - is served: no live version of its op name shadows it;
 - runs at `minTier` 1, over plain HTTP;
 - has published examples for every required param;
-- belongs to a site that already has a live op. A stranger's fresh site never sends every verifying
-  install to a host it watches, which would harvest their IP addresses.
+- belongs to a site that already has a live op, or has an ok report from an install on a network other
+  than the uploader's. That install found it by itself, through a domain search or a re-learn with the
+  same hash. A stranger's fresh site never sends every verifying install to a host it watches, which
+  would harvest their IP addresses.
 
 Only public reads are promoted by reports. A version is `review`, served to its uploader only until a
 maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
@@ -113,14 +120,20 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
   carries only GraphQL query documents. A persisted query names no document and could be a mutation;
 - has a slot with a `cookie:` or `session:` ref: every caller's client would send its own credentials;
 - is a new op name on a site that lists `loginCookies` or has an op learned while signed in;
+- is a new op name on an established site: some site on its domain has a live or seeded op. Callers
+  trust an established site, so a maintainer approves what it newly does (an x.com `follow`). The check
+  is by domain, so a second name for the same domain gets around nothing. A new version of an op the
+  site already has is no new op;
 - sends to or opens a host off its site, or lists `public` names;
 - holds something the export secret scan flags.
 
 ## Maintenance by the crowd
 
 - Every call is a health check. A live version is **degraded** when, among the last 10 reports from
-  distinct installs, more than half are `fail` or `wrong` and at least 3 installs failed. Then the
-  next best version is served. `auth`, `rate`, `blocked` and `input` say nothing about the op.
+  distinct installs (`DEGRADE_WINDOW`), more than half are `fail` or `wrong`, at least 3 installs
+  failed (`DEGRADE_MIN_FAILED`), and those failures come from at least 3 distinct networks
+  (`DEGRADE_MIN_NETWORKS`): fresh keys on one network are cheap. Then the next best version is served.
+  `auth`, `rate`, `blocked` and `input` say nothing about the op.
 - The client already heals an op that drifted. A healed public op uploads automatically as a new
   version with `parent` and `evidence.healedFrom`. Its own failed call of the old version makes it a
   heal (above), so the client sends that `fail` report before the upload.
@@ -129,7 +142,8 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
 - Versions of one op are grouped by its site and op name; each version also stores its match (method,
   host, path, GraphQL operationName). The match alone would merge distinct ops that share an endpoint
   (goodreads `getBook` and `getWorkId` both match `/book/show/*`). The best is served: live over
-  candidate over degraded, then by success rate, then by confirmations.
+  candidate over degraded; of two live versions the incumbent; otherwise by success rate, then by
+  confirmations.
 - A daily job archives a candidate or degraded version with no ok report in 30 days, and a degraded
   version older than a live version of the same op, which replaced it. It never archives a live
   version: a newer live one may be a takeover. A live version leaves live only by degrading. The job
@@ -138,9 +152,11 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
 ## Trust
 
 - A site's name is bound to its domain by its first upload; another domain under that name is refused.
-- A new site's name must start with the first label of its registrable domain (`siteOf`): `amazon` for
-  amazon.com, `crates` or `crates-io` for crates.io, `lobsters` for lobste.rs, `dominos-au` for
-  dominos.com.au. Otherwise the upload is refused with 422 and the reason. A maintainer's seed is exempt.
+- A new site's name must be exactly its registrable domain (`siteOf`) with dots turned into dashes:
+  `crates-io` for crates.io, `lobste-rs` for lobste.rs, `git-xyz` for git.xyz. Otherwise the upload is
+  refused with 422 and the reason. A name is unique by construction and cannot take another site's
+  brand. A maintainer's seed is exempt (`goodreads`, `dominos-au`).
+- An uploaded `displayName` is ignored: a site nobody seeded is titled by its domain.
 - The server runs `vetShared` and the export secret scan on every upload, and refuses a spec over 256 KB.
   It checks the declared length first, then reads the body as a stream that stops at the cap. A request
   missing a signature header or with a stale timestamp is refused before any of its body is read.
@@ -157,10 +173,20 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
   signer's own `review` versions.
 - A maintainer can block a version or a site.
 
+What these rules leave open:
+
+- A lookalike domain is its own site. Whoever registers github-xyz.com can share `github-xyz-com`, and
+  ok reports from installs on 2 networks promote it. Word search finds it only once it is live, and its
+  title is only its domain, but no rule tells a lookalike from a real site.
+- The edge cache holds a public read for up to 60 s, so a maintainer's block takes up to a minute to
+  disappear from search, site and index answers.
+- An uploaded site `description` and op descriptions are the uploader's words, shown on its page.
+
 ## What the registry stores
 
 D1 tables: `sites` (name, domain, display fields, notes, first uploader), `versions` (hash, site,
-op name, match signature, operation JSON, parent, status, uploader, evidence, timestamps), `reports`
+op name, match signature, operation JSON, parent, status, uploader and its network hash, evidence,
+timestamps including when it first went live), `reports`
 (hash, key, network hash, outcome, tier, at), `keys` (public key, first seen, counts), `rates` (hourly
 counters, kept for a day). No args, no response data, no IP addresses.
 

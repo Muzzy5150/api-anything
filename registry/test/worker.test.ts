@@ -16,7 +16,7 @@ describe("signatures", () => {
     const r = await send(env, "POST", "/v1/versions", { as: install(), body: upload() });
     assert.equal(r.status, 201, r.text);
     const expected = createHash("sha256")
-      .update(versionHashText("example-books", OperationSchema.parse(op())))
+      .update(versionHashText("example-com", OperationSchema.parse(op())))
       .digest("hex");
     assert.deepEqual(r.body, { hash: expected, status: "candidate", duplicate: false });
   });
@@ -285,7 +285,7 @@ describe("verification by the crowd", () => {
     const { env } = registry();
     const uploader = install();
     const { hash } = (await send(env, "POST", "/v1/versions", { as: uploader, body: upload() })).body;
-    const status = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
+    const status = async () => (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
 
     await report(env, uploader, hash, "ok", NET2);
     await report(env, install(), hash, "ok", NET1);
@@ -311,7 +311,7 @@ describe("verification by the crowd", () => {
       body: { reports: [{ hash, outcome: "ok" }] },
     });
     await send(env, "POST", "/v1/reports", { as: install(), ip: NET2, asn: 7922, body: [{ hash, outcome: "ok" }] });
-    assert.equal((await send(env, "GET", "/v1/sites/example-books")).body.operations[0].status, "candidate");
+    assert.equal((await send(env, "GET", "/v1/sites/example-com")).body.operations[0].status, "candidate");
   });
 
   test("an install counts once, by its latest outcome", async () => {
@@ -320,7 +320,7 @@ describe("verification by the crowd", () => {
     const k = install();
     for (let i = 0; i < 3; i++) await report(env, k, hash, "ok", NET1);
     await report(env, k, hash, "fail", NET1);
-    const served = (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
+    const served = (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
     assert.equal(served.confirmations, 0);
     assert.equal(served.successRate, 0);
   });
@@ -384,7 +384,7 @@ describe("verification by the crowd", () => {
     await report(env, install(), hash, "wrong", NET1);
     await report(env, install(), hash, "ok", NET1);
     await report(env, install(), hash, "ok", NET2);
-    const status = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
+    const status = async () => (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
     assert.equal((await status()).status, "candidate");
     await report(env, install(), hash, "ok", "203.0.113.200");
     assert.equal((await status()).status, "candidate");
@@ -397,7 +397,7 @@ describe("verification by the crowd", () => {
     const { env } = registry();
     const { hash } = (await seed(env, { site, operations: [op()] })).body.operations[0];
     for (const outcome of ["auth", "rate", "blocked", "input", "input"]) await report(env, install(), hash, outcome);
-    const served = (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
+    const served = (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
     assert.equal(served.status, "live");
     assert.equal(served.successRate, undefined);
   });
@@ -409,20 +409,23 @@ describe("maintenance by the crowd", () => {
     const live = (await seed(env, { site, operations: [op()] })).body.operations[0];
     const next = op({ request: { method: "GET", url: "https://www.example.com/api/search?q=dune&v=2", headers: {} } });
     const cand = (await send(env, "POST", "/v1/versions", { as: install(), body: upload({ operation: next }) })).body;
-    const served = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
+    const served = async () => (await send(env, "GET", "/v1/sites/example-com")).body.operations[0];
     assert.equal((await served()).hash, live.hash);
 
     await report(env, install(), live.hash, "ok");
-    await report(env, install(), live.hash, "fail");
-    await report(env, install(), live.hash, "fail");
+    await report(env, install(), live.hash, "fail", "100.64.1.1");
+    await report(env, install(), live.hash, "fail", "100.64.2.1");
     assert.equal((await served()).hash, live.hash, "two failures are not enough");
-    await report(env, install(), live.hash, "wrong");
+    // fresh keys on networks that already failed it are cheap
+    for (let i = 0; i < 3; i++) await report(env, install(), live.hash, "fail", "100.64.2.1");
+    assert.equal((await served()).hash, live.hash, "failures from two networks are not enough");
+    await report(env, install(), live.hash, "wrong", "100.64.3.1");
     const now = await served();
     assert.equal(now.hash, cand.hash);
     assert.equal(now.status, "candidate");
 
     // more installs that work again bring it back
-    for (let i = 0; i < 4; i++) await report(env, install(), live.hash, "ok");
+    for (let i = 0; i < 8; i++) await report(env, install(), live.hash, "ok");
     assert.equal((await served()).hash, live.hash);
   });
 
@@ -434,18 +437,19 @@ describe("maintenance by the crowd", () => {
       body: upload({ operation: op({ learnedLoggedIn: true }) }),
     });
     assert.equal(r.body.status, "review");
-    assert.equal((await send(env, "GET", "/v1/sites/example-books")).status, 404);
-    assert.equal((await send(env, "GET", "/v1/sites/example-books", { as: install() })).status, 404);
-    const own = await send(env, "GET", "/v1/sites/example-books", { as: uploader });
+    assert.equal((await send(env, "GET", "/v1/sites/example-com")).status, 404);
+    assert.equal((await send(env, "GET", "/v1/sites/example-com", { as: install() })).status, 404);
+    const own = await send(env, "GET", "/v1/sites/example-com", { as: uploader });
     assert.equal(own.status, 200);
     assert.equal(own.body.operations[0].status, "review");
     const found = await send(env, "GET", "/v1/search?q=books");
     assert.deepEqual(found.body.matches, []);
-    assert.doesNotMatch((await send(env, "GET", "/")).text, /href="\/sites\/example-books"/);
+    assert.doesNotMatch((await send(env, "GET", "/")).text, /href="\/sites\/example-com"/);
   });
 
   test("verify-jobs: candidates this key neither uploaded nor reported, with example args", async () => {
-    const { env } = registry();
+    // three installs promote, so two oks leave a candidate a candidate
+    const { env } = registry({ PROMOTE_KEYS: "3" });
     const me = install();
     const other = install();
     const mk = (name: string, over: Record<string, unknown> = {}) =>
@@ -466,14 +470,14 @@ describe("maintenance by the crowd", () => {
     await report(env, me, reported, "fail");
     await post(other, mk("review"), { ...evidence, cleanReplay: "skipped" });
     await post(other, mk("noExample", { params: [{ name: "q", required: true }] }));
+    // needs a browser: background checks are plain HTTP
+    await post(install(), mk("browser", { minTier: 2 }));
     await seed(env, { site, operations: [mk("seeded")] });
     // shadowed by the live version of its op, so never served: nothing to check
     await post(install(), mk("seeded", { description: "Find books, a shadow" }));
-    // needs a browser: background checks are plain HTTP
-    await post(install(), mk("browser", { minTier: 2 }));
     // a site with no live op: a stranger's fresh site would send every install to a host it watches
     const stranger = {
-      name: "example",
+      name: "example-net",
       domain: "example.net",
       baseUrl: "https://www.example.net",
     };
@@ -482,16 +486,23 @@ describe("maintenance by the crowd", () => {
       trigger: { url: "https://track.example.net/s?q={q}" },
       match: { host: "track.example.net", path: "/p" },
     });
+    const uploader = install();
     const fresh = await send(env, "POST", "/v1/versions", {
-      as: install(),
+      as: uploader,
+      ip: NET1,
       body: upload({ site: stranger, operation: theirs }),
     });
     assert.equal(fresh.body.status, "candidate", fresh.text);
 
-    const r = await send(env, "GET", "/v1/verify-jobs?limit=20", { as: me });
-    assert.deepEqual(r.body.jobs, [
-      { hash: wanted, site: "example-books", op: "wanted", args: { q: "dune", page: 1 } },
-    ]);
+    const jobs = async () => (await send(env, "GET", "/v1/verify-jobs?limit=20", { as: me })).body.jobs;
+    const want = { hash: wanted, site: "example-com", op: "wanted", args: { q: "dune", page: 1 } };
+    assert.deepEqual(await jobs(), [want]);
+    // the uploader's own friends on its network found nothing
+    await report(env, install(), fresh.body.hash, "ok", NET1);
+    assert.deepEqual(await jobs(), [want]);
+    // an install on another network found it by itself, and it worked: now the crowd checks it
+    await report(env, install(), fresh.body.hash, "ok", NET2);
+    assert.deepEqual((await jobs()).map((j: { site: string }) => j.site).sort(), ["example-com", "example-net"]);
     assert.equal((await send(env, "GET", "/v1/verify-jobs")).status, 401);
   });
 
@@ -506,10 +517,11 @@ describe("maintenance by the crowd", () => {
     const post = async (operation: unknown) =>
       (await send(env, "POST", "/v1/versions", { as: install(), body: upload({ operation }) })).body.hash as string;
 
-    const live = (await seed(env, { site, operations: [op(), named("quiet")] })).body.operations;
+    // uploaded before the seed: a new op on a seeded site would be review
     const staleCandidate = await post(named("stale"));
     const freshCandidate = await post(named("fresh"));
     const staleDegraded = await post(named("degraded"));
+    const live = (await seed(env, { site, operations: [op(), named("quiet")] })).body.operations;
     for (const v of live) age(v.hash);
     age(staleCandidate);
     age(staleDegraded, "degraded");
@@ -624,7 +636,7 @@ describe("admin", () => {
       headers: { authorization: `Bearer ${ADMIN}` },
     });
     assert.deepEqual(ok.body, { hash, status: "blocked" });
-    assert.equal((await send(env, "GET", "/v1/sites/example-books")).status, 404);
+    assert.equal((await send(env, "GET", "/v1/sites/example-com")).status, 404);
     const unknown = await send(env, "POST", `/v1/admin/versions/${"b".repeat(64)}`, {
       body: { status: "live" },
       headers: { authorization: `Bearer ${ADMIN}` },
@@ -642,7 +654,7 @@ describe("admin", () => {
       body: { status: "live" },
       headers: { authorization: `Bearer ${ADMIN}` },
     });
-    assert.equal((await send(env, "GET", "/v1/sites/example-books")).body.operations[0].status, "live");
+    assert.equal((await send(env, "GET", "/v1/sites/example-com")).body.operations[0].status, "live");
   });
 
   test("seed inserts the site context and its ops live, and a re-seed replaces what changed", async () => {
@@ -657,7 +669,7 @@ describe("admin", () => {
       first.body.operations.map((o: { status: string }) => o.status),
       ["live", "live"],
     );
-    const served = (await send(env, "GET", "/v1/sites/example-books")).body;
+    const served = (await send(env, "GET", "/v1/sites/example-com")).body;
     assert.equal(served.notes, notes);
     assert.equal(served.operations[0].lastOkAt, undefined, "a seed is no ok report");
     assert.equal(served.domain, "example.com");
@@ -670,7 +682,7 @@ describe("admin", () => {
     );
     const changed = op({ description: "Find books, better" });
     const again = await seed(env, { site, operations: [changed] });
-    const after = (await send(env, "GET", "/v1/sites/example-books")).body.operations;
+    const after = (await send(env, "GET", "/v1/sites/example-com")).body.operations;
     assert.deepEqual(
       after.map((o: { hash: string }) => o.hash),
       [again.body.operations[0].hash],
@@ -703,7 +715,7 @@ describe("serving", () => {
     assert.equal(r.status, 200);
     assert.equal(r.body.matches.length, 1);
     const [m] = r.body.matches;
-    assert.equal(m.name, "example-books");
+    assert.equal(m.name, "example-com");
     assert.equal(m.domain, "example.com");
     assert.equal(m.displayName, "Books");
     assert.deepEqual(m.operations, [
@@ -725,14 +737,14 @@ describe("serving", () => {
     await seed(env, { site, operations: [op()] });
     const r = await send(env, "GET", "/v1/index");
     const index = IndexSchema.parse(r.body);
-    assert.equal(index.sites[0]!.site, "example-books");
+    assert.equal(index.sites[0]!.site, "example-com");
     assert.deepEqual(index.sites[0]!.domains, ["example.com"]);
   });
 
   test("distinct ops on one endpoint are both served; versions of one op name are one", async () => {
     const { env } = registry();
     await seed(env, { site, operations: [op(), op({ name: "searchAuthors" })] });
-    const names = (await send(env, "GET", "/v1/sites/example-books")).body.operations.map(
+    const names = (await send(env, "GET", "/v1/sites/example-com")).body.operations.map(
       (o: { operation: { name: string } }) => o.operation.name,
     );
     assert.deepEqual(names, ["searchAuthors", "searchBooks"]);
@@ -758,7 +770,7 @@ describe("pages", () => {
   test("a landing page escapes every spec string and runs only its own script", async () => {
     const { env } = registry();
     await seed(env, { site: evil, operations: [op({ description: `Find </td>${hostile}` })] });
-    const r = await send(env, "GET", "/sites/example-books");
+    const r = await send(env, "GET", "/sites/example-com");
     assert.equal(r.status, 200);
     assert.match(r.headers.get("content-type")!, /text\/html/);
     assert.match(r.headers.get("content-security-policy")!, /script-src 'sha256-/);
@@ -766,7 +778,7 @@ describe("pages", () => {
     assert.match(r.text, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
     assert.equal(r.text.match(/<script>/g)?.length, 1);
     assert.match(r.text, /npx -y api-anything setup/);
-    assert.match(r.text, /api-anything call example-books searchBooks q=dune/);
+    assert.match(r.text, /api-anything call example-com searchBooks q=dune/);
     assert.match(r.text, /searchBooks\(q\) -&gt; title, avgRating/);
     assert.match(r.text, /Live/);
     assert.match(r.text, /<strong>bold<\/strong>/);
@@ -777,11 +789,11 @@ describe("pages", () => {
     await seed(env, { site: evil, operations: [op()] });
     const home = await send(env, "GET", "/");
     assert.equal(home.status, 200);
-    assert.match(home.text, /href="\/sites\/example-books"/);
+    assert.match(home.text, /href="\/sites\/example-com"/);
     assert.doesNotMatch(home.text, /<script>alert|<img src=x/);
     const q = await send(env, "GET", `/?q=${encodeURIComponent(`ratings ${hostile}`)}`);
     assert.doesNotMatch(q.text, /<script>alert/);
-    assert.match(q.text, /href="\/sites\/example-books"/);
+    assert.match(q.text, /href="\/sites\/example-com"/);
     const none = await send(env, "GET", "/?q=zzzzzz");
     assert.match(none.text, /No shared site matches/);
     assert.equal((await send(env, "GET", "/sites/nobody")).status, 404);
@@ -792,6 +804,6 @@ describe("pages", () => {
     await seed(env, { site, operations: [op()] });
     const r = await send(env, "GET", "/sitemap.xml");
     assert.match(r.headers.get("content-type")!, /xml/);
-    assert.match(r.text, /<loc>https:\/\/registry\.test\/sites\/example-books<\/loc>/);
+    assert.match(r.text, /<loc>https:\/\/registry\.test\/sites\/example-com<\/loc>/);
   });
 });
