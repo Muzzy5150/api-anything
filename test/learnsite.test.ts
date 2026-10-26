@@ -14,9 +14,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { browserAvailable, closeBrowser } from "../src/browser.js";
+import { loadCapture } from "../src/heal.js";
 import { hooks, type LearnSiteResult, learnSite } from "../src/learnsite.js";
 import { createServer } from "../src/mcp.js";
-import type { shareOps } from "../src/share.js";
+import { learnTool } from "../src/mcp-learn.js";
+import { HOLDOUT_PURPOSE, type shareOps } from "../src/share.js";
 import { loadSite } from "../src/store.js";
 import { type Fixture, startFixture } from "./fixture/server.js";
 
@@ -67,6 +69,8 @@ describe("learn_site", { skip: !browserAvailable() && "no Chromium browser insta
   let scoped: LearnSiteResult;
   let shares: ShareCall[];
   before(async () => {
+    // the fixture is on localhost, which MCP learn_site refuses to load anywhere else
+    learnTool.publicOnly = false;
     fx = await startFixture();
     shares = stubShare((c) => ({ site: c.site, op: c.ops[0]!, shared: true, status: "candidate", hash: "h1" }));
     scoped = await learnSite(
@@ -83,6 +87,7 @@ describe("learn_site", { skip: !browserAvailable() && "no Chromium browser insta
     );
   });
   after(async () => {
+    learnTool.publicOnly = true;
     await closeBrowser();
     await fx.close();
     rmSync(HOME, { recursive: true, force: true });
@@ -104,9 +109,7 @@ describe("learn_site", { skip: !browserAvailable() && "no Chromium browser insta
       op.params.map((p) => [p.name, p.example]),
       [["q", "bobby"]],
     );
-    assert.deepEqual(op.checks, [
-      { args: { q: "carol" }, expect: "result", purpose: "a value used as neither example when it was learned" },
-    ]);
+    assert.deepEqual(op.checks, [{ args: { q: "carol" }, expect: "result", purpose: HOLDOUT_PURPOSE }]);
     assert.equal(op.description, "search the scoped results");
     assert.match(op.request.url, /q=bobby/);
     assert.ok(!JSON.stringify(op).includes("alice"), "the spec does not say what the user asked");
@@ -165,6 +168,34 @@ describe("learn_site", { skip: !browserAvailable() && "no Chromium browser insta
     assert.equal((r.data as { title: string }[]).length, 3);
     assert.match(JSON.stringify(r.data), /dune volume 1/);
     assert.equal(r.proof?.cleanReplay, "ok");
+  });
+
+  test("a page whose data comes from a POST that is no GraphQL query is refused before the op is saved or sent", async () => {
+    const calls = stubShare((c) => ({ site: c.site, op: c.ops[0]!, shared: true }));
+    const input = {
+      site: "fx",
+      op: "rpcSearch",
+      trigger: `${fx.url}/search?q={q}`,
+      args: { q: "alice" },
+      args2: { q: "bobby" },
+      args3: { q: "carol" },
+    };
+    const saved = () => loadSite("fx")?.site.operations.some((o) => o.name === "rpcSearch");
+    // automatic: the only request with the data is the POST, so nothing is learned
+    const auto = await learnSite(input, fast);
+    assert.equal(auto.ok, false, JSON.stringify(auto));
+    assert.equal(saved(), false);
+    // picked: refused as no read
+    const rpc = loadCapture(auto.captures![0]!).exchanges.find((e) => e.request.url.includes("/api/rpc"))!;
+    const r = await learnSite(
+      { ...input, captures: auto.captures as [string, string], pickRequest: rpc.id, extract: "0" },
+      fast,
+    );
+    assert.deepEqual([r.ok, r.class], [false, "refused"], JSON.stringify(r));
+    assert.match(r.error ?? "", /a POST that is not a GraphQL query may change something/);
+    assert.equal(saved(), false);
+    assert.equal(calls.length, 0, "nothing shared");
+    assert.equal(r.proof, undefined, "no holdout call and no clean replay");
   });
 
   test("a login op is shared on a yes through MCP elicitation, and not on a no", async () => {

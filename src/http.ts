@@ -1,10 +1,13 @@
 /** Tier 1: fill the stored template and send it with Node fetch. */
+import { lookup } from "node:dns/promises";
+import { isIPv4, isIPv6 } from "node:net";
 import * as zlib from "node:zlib";
 import { asText, fillSlotTemplate, setAt, templateRefs, walk } from "./codec.js";
 import { matches } from "./learn.js";
 import { cookieHeaderFor, cookieValue, parseSetCookie, type Session } from "./session.js";
 import type { Match, Operation, Param, Request } from "./spec.js";
 import type { StoredCookie } from "./types.js";
+import { badAddress } from "./vet.js";
 
 export interface Sent {
   status: number;
@@ -26,7 +29,81 @@ export interface SendOptions {
   timeoutMs?: number;
   /** minimum gap between requests to one site (default 1 s) */
   minIntervalMs?: number;
+  /**
+   * someone else's spec, or a candidate verified in the background: the request and every redirect hop
+   * must be https to a public host (`badAddress`) that resolves to no loopback, private, link-local,
+   * CGNAT or unique-local address (`publicAddress`). Tiers 2 and 3 are the browser's, which this does
+   * not reach.
+   */
+  publicOnly?: boolean;
 }
+
+/** How a public-only send resolves a host before connecting; tests replace it, since they stay off the network. */
+export const resolver = {
+  lookup: (host: string): Promise<{ address: string }[]> => lookup(host, { all: true, verbatim: true }),
+};
+
+/** An IPv4 address as 4 numbers, or undefined. */
+const octets = (ip: string) => (isIPv4(ip) ? ip.split(".").map(Number) : undefined);
+
+/**
+ * An address no public-only request may reach: this host (0/8, 127/8, ::, ::1), the private ranges
+ * (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10), CGNAT (100.64/10), unique-local
+ * (fc00::/7), multicast and reserved (224/3, ff00::/8); an IPv4-mapped or NAT64 IPv6 address by the
+ * IPv4 address inside it.
+ */
+export function privateAddress(ip: string): boolean {
+  const v4 = octets(ip);
+  if (v4) {
+    const [a, b] = v4 as [number, number];
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b < 128) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b < 32) ||
+      (a === 192 && b === 168) ||
+      a >= 224
+    );
+  }
+  if (!isIPv6(ip)) return true;
+  const h = ip.toLowerCase().replace(/^\[|\]$/g, "");
+  const tail = /^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/.exec(h)?.[1];
+  if (tail) return privateAddress(tail);
+  const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (hex) {
+    const n = (Number.parseInt(hex[1]!, 16) << 16) | Number.parseInt(hex[2]!, 16);
+    return privateAddress([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join("."));
+  }
+  if (h === "::" || h === "::1") return true;
+  const first = Number.parseInt(h.split(":")[0] || "0", 16);
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;
+}
+
+/**
+ * Why a public-only request may not go to `url`, or undefined when it may: `badAddress`, then every
+ * address the host resolves to. ponytail: fetch resolves the host again when it connects, so a DNS
+ * answer that changes in between (rebinding) is not caught; pin the address in an undici dispatcher if
+ * that is ever needed.
+ */
+export async function publicAddress(url: string): Promise<string | undefined> {
+  const bad = badAddress(url);
+  if (bad) return bad;
+  const host = new URL(url).hostname;
+  let found: { address: string }[];
+  try {
+    found = await resolver.lookup(host);
+  } catch (e) {
+    return `has a host that does not resolve (${host}: ${(e as { code?: string }).code ?? (e as Error).message})`;
+  }
+  if (!found.length) return `has a host that does not resolve (${host})`;
+  const inside = found.find((a) => privateAddress(a.address));
+  return inside ? `has a host that resolves to the non-public address ${inside.address} (${host})` : undefined;
+}
+
+/** A public-only request whose own address is not public: nothing was sent. */
+export class AddressRefused extends Error {}
 
 /** Whether a decimal or exponent literal's exact value is past the largest safe integer (2^53 - 1) in size. */
 function pastSafeInteger(v: string): boolean {
@@ -345,6 +422,8 @@ export async function send(
   opts: SendOptions,
 ): Promise<Sent> {
   const req = buildRequest(op, args, session);
+  const refusedAt = opts.publicOnly ? await publicAddress(req.url) : undefined;
+  if (refusedAt) throw new AddressRefused(`not sending ${op.name}: ${new URL(req.url).origin} ${refusedAt}`);
   await pace(opts.site, opts.minIntervalMs ?? 1000);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const signal = AbortSignal.timeout(timeoutMs);
@@ -374,6 +453,11 @@ export async function send(
       if (REDIRECT.has(res.status) && location) {
         await res.body?.cancel();
         hop = nextHop(op, session, hop, res.status, location, hops, TIER1_REDIRECTS);
+        const off = opts.publicOnly ? await publicAddress(hop.url) : undefined;
+        if (off)
+          throw new RedirectRefused(
+            `not following the HTTP ${res.status} redirect to ${new URL(hop.url).origin}: it ${off}`,
+          );
         // the jar's cookies for the new address, whichever origin it is
         const { cookie: _sent, ...headers } = hop.headers;
         const cookie = cookieHeaderFor(jar, hop.url);

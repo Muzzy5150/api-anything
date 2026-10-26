@@ -775,6 +775,21 @@ local rules below are defense in depth on top of that.
   lets an unsafe redirect hop of the op's own request through on any origin (a signed read checked
   elsewhere with a 307); for a shared spec, a hop to another site is aborted, before the steps run too.
 - *Writes stay gated.* `allowWrites` is required at every entry point, whatever the spec's source.
+- *Someone else's request that may change something goes without the user's sessions.* For a spec
+  with `shared` (pulled, or a bundled one upgraded from the registry), a request whose method is not
+  GET or HEAD gets no cookie jar and no session values at tier 1, and a tier-2 page fetch of it sends
+  none of the profile's cookies (`credentials: "omit"`): a "read" sent as POST can be a write the rules
+  cannot see. The exception is a write (`readOnly: false`) a human pulled (no `by: "agent"`), called
+  with `allowWrites`: the user asked for that write. Tier 3 runs the site's own page, which sends what
+  it sends. The user's own specs and bundled ones not upgraded are unchanged (`bare` in `execute.ts`).
+- *Someone else's spec sends only to public addresses.* At tier 1, for a spec with `shared`, the request
+  and every redirect hop must pass `badAddress` (https, a host under a public suffix, no IP literal or
+  `localhost`), and every address the host resolves to (`node:dns` lookup, all of them) must be outside
+  loopback, private, link-local, CGNAT, unique-local, multicast and reserved ranges, IPv4-mapped and
+  NAT64 forms included (`publicAddress` in `http.ts`); otherwise nothing is sent there. A refused first
+  request is an `error` with nothing sent; a refused hop is a redirect not followed. Background
+  verification sets the same check on `cleanCall` (`publicOnly`). Tiers 2 and 3 are the browser's and
+  are not covered: Chrome resolves and connects on its own.
 - *Text is data.* Notes, descriptions and hints reach the calling agent; `ops`, MCP `list_operations`
   and `find_sites` say beside a shared spec's that someone else wrote them and they are not
   instructions. Op and param names, which `next` hints spell in commands, are restricted.
@@ -804,8 +819,9 @@ skip pull's `shared` record and each op's `version`.
 something; trigger steps can click what the page lets them before `readGuard` acts on the page's own
 unsafe requests, and page script at tier 2 and 3 sends what it likes with the browser's cookies; the
 regex rule catches the common catastrophic shapes and is no bound on run time (`(a|aa)+` passes);
-hostnames are checked, not what they resolve to, so a public name pointing at a private address is
-not refused; shared workers are not guarded (see Browser).
+what a hostname resolves to is checked at tier 1 only, and fetch resolves it again when it connects, so
+a DNS answer that changes in between (rebinding) is not caught, and tiers 2 and 3 are not checked at
+all; shared workers are not guarded (see Browser).
 
 **Versions.** Each op the registry serves is a version, named by the SHA-256 of its site's name and
 the canonical op (`versionHashText`: keys sorted, `learnedAt` left out). A local op records the
@@ -853,7 +869,9 @@ a stray word and is left out. With no match, `find_sites` answers `nextCall: {to
 no `learnedAt`, no `shared`, no `version`), the param examples kept (learning arranges for them to be
 the agent's chosen second example and holdout, never the user's own request), the site context
 (name, domain, baseUrl, display fields, login cookies) and the caller notes (`<site>.md` before
-`## Maintainer notes`). An op is public when its clean replay was ok (`cleanCall`: no cookies, no
+`## Maintainer notes`). The notes go only with `consent` (the user's own notes are theirs), or when
+they came from the registry (a pulled site's, which go back with its heal); an automatic upload of a
+site the user wrote notes for carries none. An op is public when its clean replay was ok (`cleanCall`: no cookies, no
 session values, plain HTTP), it was learned signed out, it reads, every host it sends to or opens is
 on its site's domain, and it lists no `public` names. A public op uploads when `share` is on or with
 `consent`; anything else only with `consent: true`, and otherwise the answer is `needsConsent`. A
@@ -865,7 +883,10 @@ included; an upload over 256 KB is refused. What may be the user's own is listed
 in the outcome of a consented op for the caller to show: an email address, a UUID or a literal IP
 anywhere in the upload (keys included) or the notes, a run of 5+ digits in a URL path no param
 fills, a literal typed by a `fill` step, a param default, an `enum` value holding a run of 5+ digits,
-and every check's args. It is sent signed to `POST /v1/versions`, and the answer's hash and status
+and every check's args. A check's args hold an automatic upload back like the rest, except those of the
+check `learn_site` records from its holdout call (`purpose: "learn_site holdout"`, `HOLDOUT_PURPOSE`),
+whose values the agent chose as neither of the user's examples; a check recorded with
+`api-anything check` needs consent. It is sent signed to `POST /v1/versions`, and the answer's hash and status
 become the local op's `version`.
 
 **Publish.** `api-anything publish <site> [op ...]` is the human's way to share: without `--yes` it
@@ -905,14 +926,18 @@ is out, then stops it; the MCP server flushes every 5 seconds and on exit.
 **Heal back.** When a call heals an op that was a registry version and `share` is on, the healed op
 is replayed clean with its examples (`cleanCall`); when that is ok and the op is public, it is
 uploaded with `parent` and `evidence.healedFrom` set to the old hash, and its new version recorded.
-Otherwise it stays a local op with no version.
+The registry counts it as a heal only after this install reported `fail` on the parent, so the queued
+reports (the call's `fail` among them) are flushed and awaited before the upload. Otherwise it stays a
+local op with no version.
 
 **Background verification (`background.ts`).** An MCP server with `share` on that has seen no message
 in or out for 60 s asks `GET /v1/verify-jobs` (signed) for candidates this install has not reported,
 fetches each candidate's op from `GET /v1/sites/<site>` (matched by hash; not installed, held to the
-shared rules), calls it with the job's args through `cleanCall`, never with the user's sessions, and
-reports the outcome. At most 20 a day (`~/.api-anything/verify-jobs.json`); a round stops when the
-client goes away.
+shared rules), calls it with the job's args through `cleanCall` with `publicOnly` (https to public
+addresses only, every hop, as above), never with the user's sessions, and reports the outcome. A
+candidate with `minTier` above 1 is skipped: plain HTTP would fail it whether it works or not, and the
+report would count against it. The calls go from the user's IP address, which the setup question says.
+At most 20 a day (`~/.api-anything/verify-jobs.json`); a round stops when the client goes away.
 
 **Bundled specs.** The package's `sites/` stays an offline fallback, trusted as the package is. The
 first call of a bundled site with no `version`, with `share` on, pulls the registry's copy in the
@@ -920,8 +945,8 @@ background, without the agent mark, so later calls carry a version and report. A
 recorded (`~/.api-anything/upgrades.json`), so a registry without the site is asked again only after
 a week.
 
-Not in this version: signed or pinned versions on pull, runtime checks of resolved addresses, a
-bounded regex engine, an MCP `publish`, and the `wrong` outcome (an agent saying the data contradicted
+Not in this version: signed or pinned versions on pull, checks of resolved addresses at tiers 2 and
+3 and a connection pinned to the address checked, a bounded regex engine, an MCP `publish`, and the `wrong` outcome (an agent saying the data contradicted
 the page).
 
 ## Logging in (`login.ts`, `import.ts`)
@@ -1030,7 +1055,18 @@ independent alternative.
   Sharing specs): each match's ops with their params and registry status, `nextCall`
   `{tool: "call_operation", args: {site}}` for the best match, or `{tool: "learn_site"}` with none;
   `list_operations` and `call_operation` on a site that is not installed pull it from the registry first
-  (see "Agents pull"), and `list_operations` shows each op's registry status. With `share` on, an
+  (see "Agents pull"), and `list_operations` shows each op's registry status. `learn_site` (CLI
+  `learn`, `learnsite.ts`) learns a read with the user's args, the agent's second and third values, a
+  holdout call and a clean replay, then shares it (see Sharing specs). It refuses a write, and a chosen
+  request (automatic or `pickRequest`) that the shared rules would refuse as a read or whose method is
+  not GET or HEAD (a GraphQL query sent as POST excepted), before the holdout call or the clean replay
+  sends anything; the automatic pick passes over such a request for one that reads. Over MCP the trigger
+  must pass `badAddress` (page text may steer the agent to a page on this machine or the local network);
+  the CLI takes any address, the user typed it. A new site's default name is its host without `www.`,
+  or its registrable domain when the host does not start with that domain's first label, since the
+  registry binds a new name only when it does; a given `site` that does not is refused. When a share
+  needs the user's yes, the prompt (MCP elicitation or the CLI's) and the `next` that tells the agent to
+  ask list the upload's `personal` items. With `share` on, an
   idle server verifies a few candidates a day and flushes call reports (see Sharing specs). The agent may be steered by page content, so MCP `login` import
   only refreshes a site that has a spec and a browser source a human chose with the CLI, from that
   same profile; anything else answers `next`: ask the user to run `api-anything login <site>`. Mode

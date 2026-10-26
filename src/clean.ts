@@ -19,7 +19,14 @@ export interface CleanResult {
 export async function cleanCall(
   op: Operation,
   args: Record<string, unknown>,
-  o: { site: string; fetchImpl?: typeof fetch; timeoutMs?: number; minIntervalMs?: number },
+  o: {
+    site: string;
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+    minIntervalMs?: number;
+    /** someone else's op (background verification): only https to public addresses, every redirect hop too (`SendOptions.publicOnly`) */
+    publicOnly?: boolean;
+  },
 ): Promise<CleanResult> {
   const t0 = performance.now();
   if (!op.readOnly) return { class: "input", reason: "a write is never replayed", ms: 0 };
@@ -30,6 +37,7 @@ export async function cleanCall(
       fetchImpl: o.fetchImpl,
       timeoutMs: o.timeoutMs ?? 20_000,
       minIntervalMs: o.minIntervalMs,
+      publicOnly: o.publicOnly,
     });
     const j = judge(op, r);
     return {

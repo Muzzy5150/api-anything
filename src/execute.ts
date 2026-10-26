@@ -26,7 +26,17 @@ import {
   profileDir,
   runOpTrigger,
 } from "./heal.js";
-import { BadHeader, buildRequest, holdsRef, nextHop, RedirectRefused, type Sent, send, withDefaults } from "./http.js";
+import {
+  AddressRefused,
+  BadHeader,
+  buildRequest,
+  holdsRef,
+  nextHop,
+  RedirectRefused,
+  type Sent,
+  send,
+  withDefaults,
+} from "./http.js";
 import { reimportIfBrowser } from "./login.js";
 import { afterCall } from "./report.js";
 import { redact } from "./secrets.js";
@@ -161,6 +171,23 @@ interface Ctx {
   maxTier: Tier;
   /** every attempt this call made, in order: what a write did is read from them */
   log: Attempt[];
+  /** the site's `shared` record: someone else wrote this spec (pulled, or a bundled one upgraded from the registry) */
+  shared?: Site["shared"];
+}
+
+const NO_SESSION: Session = { cookies: [], values: {} };
+
+/**
+ * Whether this op of someone else's spec goes without the user's cookies and session values. A request
+ * that is no GET or HEAD may change something whatever the spec says it is; it gets them only when it
+ * says so (a write), the call allows writes, and a human pulled the spec (not an agent: page text may
+ * have steered it there). The user's own specs, and bundled ones not upgraded, are not affected.
+ */
+function bare(ctx: Ctx, op: Operation): boolean {
+  if (!ctx.shared) return false;
+  const method = op.request.method.toUpperCase();
+  if (method === "GET" || method === "HEAD") return false;
+  return !(ctx.shared.by !== "agent" && !op.readOnly && ctx.opts.allowWrites);
 }
 
 /** What one attempt did to a write. */
@@ -349,7 +376,8 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
       const stopped = run.repeats === 1 ? "the repeat was" : `${run.repeats} repeats were`;
       return { ...a, note: `the page sent this write ${run.repeats + 1} times: ${stopped} stopped in the browser` };
     }
-    const session = loadSession(ctx.site);
+    const none = bare(ctx, op);
+    const session = none ? NO_SESSION : loadSession(ctx.site);
     let r: Sent | PageFetchResult;
     if (tier === 1) {
       const sent = await send(op, ctx.args, session, {
@@ -357,6 +385,8 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
         fetchImpl: ctx.opts.fetchImpl,
         timeoutMs: ctx.opts.timeoutMs,
         minIntervalMs: ctx.opts.minIntervalMs,
+        // someone else's spec sends only to public addresses; tiers 2 and 3 are the browser's, out of this guard's reach
+        publicOnly: !!ctx.shared,
       });
       // A rotating cookie (a rolling session, __cf_bm) must ride on the next call.
       if (sent.setCookies) {
@@ -379,6 +409,8 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
         profileDir: profileDir(),
         timeoutMs: ctx.opts.timeoutMs,
         retryOnNavigation: op.readOnly,
+        // the page's own cookies, unless they may not go (`bare`)
+        ...(none ? { credentials: "omit" as const } : {}),
         // tier 1's policy, one hop at a time: a page's own fetch() would follow with everything aboard
         redirect: (from, status, location, taken) => nextHop(op, session, from, status, location, taken),
       });
@@ -387,6 +419,16 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
   } catch (e) {
     // nothing was sent when the browser could not start
     if (e instanceof ProfileInUse) return { tier, class: "error", reason: e.message, hint: PROFILE_HINT, unsent: true };
+    // someone else's spec names an address on this machine or the local network: nothing was sent, and no tier sends it
+    if (e instanceof AddressRefused)
+      return {
+        tier,
+        class: "error",
+        reason: e.message,
+        unsent: true,
+        hint: "do not retry: the spec someone else wrote sends to an address that is not public; tell the user, and learn the site again with learn_site",
+        step: "report",
+      };
     if (e instanceof RedirectRefused) {
       // The redirect is the site's answer, so a retry meets it again; the request it answered was sent.
       const add = `api-anything add ${ctx.site} ${op.name} ...${op.readOnly ? "" : " --write"}`;
@@ -767,7 +809,7 @@ export async function call(
       return false;
     }
   };
-  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log };
+  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log, shared: site.shared };
   const remembered = rememberedTier(siteName, op.name);
   // A remembered escalation is a speed hint, not a requirement: under a lower cap, start at the op's own tier.
   let tier = Math.max(op.minTier, remembered !== undefined && remembered <= ctx.maxTier ? remembered : 1) as Tier;
@@ -947,7 +989,7 @@ export async function heal(
       retry: "no",
     });
   }
-  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log };
+  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log, shared: site.shared };
   const tier = Math.min(Math.max(op.minTier, rememberedTier(siteName, op.name) ?? 1), 2) as Tier;
   const h = await safeHeal(
     healOperation(siteName, op, args, {

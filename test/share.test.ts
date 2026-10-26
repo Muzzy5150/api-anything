@@ -5,27 +5,36 @@
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DAILY_JOBS, verifyCandidates } from "../src/background.js";
+import { cleanCall } from "../src/clean.js";
 import { call } from "../src/execute.js";
+import { resolver } from "../src/http.js";
 import { ensureKey, saveSettings, signedHeaders } from "../src/identity.js";
 import { settle } from "../src/report.js";
 import { mergeCapture, saveSession } from "../src/session.js";
-import { shareOps } from "../src/share.js";
+import { HOLDOUT_PURPOSE, shareOps } from "../src/share.js";
 import { parseSite, type Site } from "../src/spec.js";
-import { loadSite, saveSite } from "../src/store.js";
+import { loadSite, registryDir, saveSite, userSitesDir } from "../src/store.js";
 import { type FakeRegistry, hashOf, served, startRegistry } from "./fixture/registry.js";
 
 let fake: FakeRegistry;
 let onUpload: FakeRegistry["onUpload"];
+const realLookup = resolver.lookup;
+/** what each host resolves to: a public address unless a test says otherwise; no DNS query leaves the machine */
+const dns = new Map<string, string>();
 before(async () => {
   fake = await startRegistry();
   onUpload = fake.onUpload;
   process.env.API_ANYTHING_REGISTRY = fake.url;
+  resolver.lookup = async (host) => [{ address: dns.get(host) ?? "93.184.215.14" }];
+});
+after(() => {
+  resolver.lookup = realLookup;
 });
 after(() => fake.close());
 beforeEach(() => {
@@ -37,6 +46,7 @@ beforeEach(() => {
   fake.received.length = 0;
   fake.down = false;
   fake.hang = false;
+  dns.clear();
 });
 
 const shareOn = (share = true) => saveSettings({ share, askedAt: "2026-10-25T00:00:00.000Z" });
@@ -99,12 +109,48 @@ test("shareOps: a read whose clean replay met a bot wall is public too, and goes
   assert.equal(fake.uploads()[0]!.evidence.cleanReplay, "blocked");
 });
 
-test("shareOps: a public read's check args do not hold back its automatic share; they stay listed", async () => {
+test("shareOps: learn_site's holdout check does not hold back an automatic share; a check the user recorded does", async () => {
   shareOn();
-  saveSite(site({ checks: [{ args: { q: "kittens" }, expect: "result" }] }));
+  saveSite(site({ checks: [{ args: { q: "kittens" }, expect: "result", purpose: HOLDOUT_PURPOSE }] }));
   const [out] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
   assert.equal(out!.shared, true, JSON.stringify(out));
   assert.match(out!.personal!.join("\n"), /checks\[0\] sends q=kittens/);
+
+  // api-anything check records one with the user's own values, or with any other purpose: their yes first
+  for (const checks of [
+    [{ args: { q: "my-own-query" }, expect: "result" }],
+    [{ args: { q: "my-own-query" }, expect: "result", purpose: "my order" }],
+    [
+      { args: { q: "kittens" }, expect: "result", purpose: HOLDOUT_PURPOSE },
+      { args: { q: "my-own-query" }, expect: "result" },
+    ],
+  ]) {
+    fake.received.length = 0;
+    saveSite(site({ checks }));
+    const [held] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
+    assert.deepEqual([held!.shared, held!.needsConsent], [false, true], JSON.stringify(held));
+    assert.match(held!.personal!.join("\n"), /my-own-query/);
+    assert.equal(uploads().length, 0, "nothing went up");
+    const [yes] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" }, consent: true });
+    assert.equal(yes!.shared, true);
+  }
+});
+
+test("shareOps: an automatic share sends no notes the user wrote; consent does, and a pulled site's notes go back with a heal", async () => {
+  shareOn();
+  saveSite(site());
+  writeFileSync(join(userSitesDir(), "demo.md"), "My own notes about my account.\n");
+  await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
+  assert.equal(fake.uploads()[0]!.site.notes, undefined, "the user's own notes stay here");
+  await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" }, consent: true });
+  assert.equal(fake.uploads()[1]!.site.notes, "My own notes about my account.");
+
+  // a pulled site's notes came from the registry: they go back up with its healed op
+  rmSync(join(userSitesDir(), "demo.md"));
+  mkdirSync(registryDir(), { recursive: true });
+  writeFileSync(join(registryDir(), "demo.md"), "Search is stories only.\n");
+  await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
+  assert.equal(fake.uploads()[2]!.site.notes, "Search is stories only.");
 });
 
 test("shareOps: anything that is not a public read waits for the user's yes", async () => {
@@ -396,6 +442,12 @@ test("a call that heals a registry version reports it failed, and shares the hea
   const [u] = fake.uploads();
   assert.equal(u?.parent, parent);
   assert.equal(u?.evidence.healedFrom, parent);
+  // the registry counts a heal only after the uploader's fail report on its parent: the report goes first
+  const paths = fake.received.map((x) => x.path);
+  assert.ok(
+    paths.indexOf("/v1/reports") >= 0 && paths.indexOf("/v1/reports") < paths.indexOf("/v1/versions"),
+    paths.join(", "),
+  );
   assert.equal(u?.evidence.cleanReplay, "ok");
   assert.match(u!.operation.request.url, new RegExp(`/api/${NEW}/search`));
   assert.equal(cookies.at(-1), null, "the clean replay sent no cookie");
@@ -567,4 +619,92 @@ test("a bundled site the registry does not have is asked about once, not on ever
   await settle(5000);
   assert.equal(fake.received.filter((r) => r.path === "/v1/sites/hacker-news").length, 1);
   assert.equal(loadSite("hacker-news")!.source, "bundled");
+});
+
+test("background verification skips a candidate that needs the browser, and sends only to public addresses", async () => {
+  shareOn();
+  const browserOnly = site({ minTier: 2 }, { name: "paged" });
+  const inside = site({
+    request: { method: "GET", url: "https://intranet.example.com/api/search?q=kittens", headers: {} },
+    match: { host: "intranet.example.com", path: "/api/search" },
+  });
+  const moved = site(
+    {
+      request: { method: "GET", url: "https://www.example.org/api/search?q=kittens", headers: {} },
+      trigger: { url: "https://www.example.org/search?q={q}" },
+      match: { host: "www.example.org", path: "/api/search" },
+    },
+    { name: "moved", baseUrl: "https://www.example.org" },
+  );
+  for (const s of [browserOnly, inside, moved]) fake.sites.set(s.name, served(s, undefined, "candidate"));
+  fake.jobs = [browserOnly, inside, moved].map((s) => ({
+    hash: hashOf(s.name, s.operations[0]!),
+    site: s.name,
+    op: "search",
+    args: { q: "x" },
+  }));
+  dns.set("intranet.example.com", "192.168.0.10");
+  const sent: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request) => {
+    sent.push(String(input));
+    // the attacker's server answers with a redirect into this machine
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8080/admin/reboot" } });
+  }) as typeof fetch;
+
+  assert.equal(await verifyCandidates({ fetchImpl, minIntervalMs: 0 }), 2, "the browser-only candidate is not run");
+  assert.deepEqual(sent, ["https://www.example.org/api/search?q=x"], "nothing inside the network was fetched");
+  const reports = fake.reports();
+  assert.deepEqual(
+    reports.map((r) => r.outcome),
+    ["fail", "fail"],
+  );
+  assert.equal(
+    reports.some((r) => r.hash === fake.jobs[0]!.hash),
+    false,
+    "no false fail for the candidate plain HTTP cannot run",
+  );
+});
+
+test("cleanCall with publicOnly refuses a redirect into the network, and a host that resolves into it, before sending", async () => {
+  const op = site().operations[0]!;
+  const seen: string[] = [];
+  const to = (location: string) =>
+    (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      return String(input).startsWith("https://www.example.com/")
+        ? new Response(null, { status: 302, headers: { location } })
+        : json({ hits: [{ t: 1 }] });
+    }) as typeof fetch;
+  for (const location of [
+    "http://127.0.0.1:9/admin",
+    "https://10.0.0.1/",
+    "https://printer.local/",
+    "https://[::1]/",
+  ]) {
+    seen.length = 0;
+    const r = await cleanCall(
+      op,
+      { q: "x" },
+      { site: "demo", fetchImpl: to(location), minIntervalMs: 0, publicOnly: true },
+    );
+    assert.equal(r.class, "error", location);
+    assert.match(r.reason, /not following the HTTP 302 redirect/, location);
+    assert.equal(seen.length, 1, location);
+  }
+  dns.set("www.example.com", "169.254.169.254");
+  seen.length = 0;
+  const meta = await cleanCall(
+    op,
+    { q: "x" },
+    { site: "demo", fetchImpl: to("https://x"), minIntervalMs: 0, publicOnly: true },
+  );
+  assert.match(meta.reason, /non-public address 169\.254\.169\.254/);
+  assert.equal(seen.length, 0);
+  // learn_site's own clean replay of the user's own op is not limited
+  const own = await cleanCall(
+    op,
+    { q: "x" },
+    { site: "demo", fetchImpl: to("http://127.0.0.1:9/api"), minIntervalMs: 0 },
+  );
+  assert.equal(own.class, "ok");
 });

@@ -18,10 +18,15 @@ connects the MCP server to each (and the skill where the agent takes skills), ch
 browser (needed only to learn sites), makes the install's key (`identity.ts`: an Ed25519 pair in
 `~/.api-anything/key.json`, 0600) and asks one question:
 
-> Help build the shared catalog? Your agent will share what it learns from public pages (never logins,
-> never your data), report whether calls work, and check a few new operations a day in the background.
+> Help build the shared catalog? Your agent will share operations it learns from public pages (never
+> your cookies or logins), report under this install's anonymous key whether calls work, and test a few
+> new operations a day from your network. Site searches go to the catalog either way.
 
-The answer is `settings.json` `share: true|false` (default yes). No account.
+The answer is `settings.json` `share: true|false` (default yes). No account. What it does not change:
+`find_sites` sends its words, domain or URL to `GET /v1/search` whether sharing is on or off (the
+local specs are searched too, and answer alone when the registry cannot be reached), and so does a
+call of a site this machine lacks, which fetches it. The registry sees the request's IP address, as any
+web server does, and does not store it.
 
 ## Using an operation that exists
 
@@ -38,7 +43,9 @@ The answer is `settings.json` `share: true|false` (default yes). No account.
    site fetched this way only the reads run until a human runs `api-anything pull` (the `by: "agent"`
    mark, as before). The call runs on the user's machine: plain HTTP first, the browser if it must.
 3. After the call, a report (`POST /v1/reports`): version hash, outcome, tier, ms. No args, no data.
-   Reports are batched, sent in the background, and dropped when the registry cannot be reached.
+   Reports are batched, sent in the background, and dropped when the registry cannot be reached. Each
+   is signed by the install's key and stored with it and the time it arrived: the key is anonymous, but
+   it ties together every report and upload this install makes.
 
 ## Learning an operation that does not exist
 
@@ -52,10 +59,20 @@ The answer is `settings.json` `share: true|false` (default yes). No account.
    - a clean replay: the op called with no cookies and no session values. Ok means it is public; so does
      a bot wall answering (Anubis, Cloudflare): the data is public behind it, and each caller's browser
      tier passes it.
+   Before the holdout call sends anything, `learn_site` refuses a request that is no read: a method other
+   than GET or HEAD unless it is a GraphQL query sent as POST, a GraphQL mutation, or a param that is the
+   whole body or the document. Over MCP the trigger must be an https page on a public host.
 4. `shareOps` uploads it (`POST /v1/versions`, signed). A public read goes automatically when
    `share` is on. A login op or a write is uploaded only with the user's yes (CLI prompt, or MCP
-   elicitation where the client supports it). The published examples are the agent's chosen second
-   example and holdout, never the user's own request.
+   elicitation where the client supports it); the prompt lists what in the upload may be the user's own
+   (an email, an id, a literal typed into the page). The published examples are the agent's chosen second
+   example and holdout, never the user's own request. An automatic upload carries no checks but
+   learn_site's holdout and none of the user's own `<site>.md` notes: a check recorded with
+   `api-anything check`, or notes the user wrote, go only with their yes (`publish --yes`). A pulled
+   site's notes came from the registry and go back with its heal.
+5. A new site's name must start with the first label of its registrable domain (`crates`, `crates-io`
+   or `crates.io` for crates.io; `lobsters` for lobste.rs). `learn_site`'s default name does (the host,
+   else the registrable domain), and a given `site` that does not is refused before anything runs.
 
 ## Verification by the crowd
 
@@ -77,7 +94,9 @@ where `PROMOTE_KEYS` is set above `PROMOTE_NETWORKS`.
 
 Background verification makes the long tail move: an MCP server idle for a minute asks
 `GET /v1/verify-jobs` for candidates and calls each with its published examples, plain HTTP only, no
-cookies, at most 20 a day, and reports the outcome. A job is a candidate that:
+cookies, at most 20 a day, and reports the outcome. The calls go from the user's machine and IP address,
+only over https to a host under a public suffix that resolves to no private, loopback, link-local, CGNAT
+or unique-local address, every redirect hop included. A job is a candidate that:
 
 - this key neither uploaded nor reported;
 - is served: no live version of its op name shadows it;
@@ -104,7 +123,7 @@ maintainer sets its status (`POST /v1/admin/versions/:hash`), when it:
   next best version is served. `auth`, `rate`, `blocked` and `input` say nothing about the op.
 - The client already heals an op that drifted. A healed public op uploads automatically as a new
   version with `parent` and `evidence.healedFrom`. Its own failed call of the old version makes it a
-  heal (above).
+  heal (above), so the client sends that `fail` report before the upload.
 - Identical repairs from many installs hash the same: each upload of an existing version counts as
   its uploader's confirmation.
 - Versions of one op are grouped by its site and op name; each version also stores its match (method,

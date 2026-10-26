@@ -7,8 +7,12 @@ import { loadSettings } from "./identity.js";
 import { plan } from "./publish.js";
 import { registryRequest } from "./registry.js";
 import type { Evidence, Status, UploadResult } from "./registry-api.js";
+import { flushReports } from "./report.js";
 import type { Operation } from "./spec.js";
 import { loadSite, updateSite } from "./store.js";
+
+/** The purpose of the check learn_site records from its holdout call: the one kind an automatic share may carry. */
+export const HOLDOUT_PURPOSE = "learn_site holdout";
 
 export interface ShareOutcome {
   site: string;
@@ -39,7 +43,7 @@ export async function shareOps(
   if (!ops.length) return [];
   let p: ReturnType<typeof plan>;
   try {
-    p = plan(site, { ops, evidence: o.evidence, parent: o.parent });
+    p = plan(site, { ops, evidence: o.evidence, parent: o.parent, consent: o.consent });
   } catch (e) {
     return ops.map((op) => ({ site, op, shared: false, reason: (e as Error).message.split("\n")[0] }));
   }
@@ -51,10 +55,15 @@ export async function shareOps(
       out.push({ ...base, shared: false, reason: `refused: ${op.errors.join("; ")}` });
       continue;
     }
-    // A check's args are values learn_site's agent chose (the user's own refuse the share there) or the
-    // registry's own: they hold the user back only from what needs consent. An email, an id, an IP or a
-    // literal typed into the page does hold an automatic share back.
-    const holding = op.personal.filter((x) => !/\.checks\[\d+\] sends /.test(x));
+    // The holdout check learn_site records has args its agent chose as neither of the user's examples (the
+    // user's own refuse the share there): it holds back only what needs consent anyway. A check the user
+    // recorded (api-anything check), an email, an id, an IP or a literal typed into the page holds an
+    // automatic share back.
+    const checks = op.upload.operation.checks ?? [];
+    const holding = op.personal.filter((x) => {
+      const j = /\.checks\[(\d+)\] sends /.exec(x)?.[1];
+      return j === undefined || checks[Number(j)]?.purpose !== HOLDOUT_PURPOSE;
+    });
     if (!o.consent && !(op.public && share && !holding.length)) {
       out.push({
         ...base,
@@ -130,6 +139,8 @@ export async function healBack(
   if (!args) return undefined;
   const clean = await cleanCall(op, args, { site, fetchImpl: o.fetchImpl, minIntervalMs: o.minIntervalMs });
   if (clean.class !== "ok" && clean.class !== "blocked") return undefined;
+  // the registry counts it as a heal only after this install's `fail` report on `parent`: send that first
+  await flushReports(o.signal);
   const [shared] = await shareOps(site, [opName], {
     evidence: { cleanReplay: clean.class, healedFrom: parent },
     parent,
