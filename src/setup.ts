@@ -12,7 +12,13 @@ import { createInterface } from "node:readline/promises";
 import { browserChoice } from "./browser.js";
 import { ensureKey, keyFile, loadSettings, saveSettings } from "./identity.js";
 
-export const SERVER = { command: "npx", args: ["-y", "api-anything", "mcp"] };
+export interface Entry {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+/** The entry for agents that start from the user's shell (Claude Code, Codex) and so find npx on PATH. */
+export const SERVER: Entry = { command: "npx", args: ["-y", "api-anything", "mcp"] };
 const NAME = "api-anything";
 
 export const AGENTS = ["claude-code", "codex", "cursor", "claude-desktop"] as const;
@@ -89,8 +95,25 @@ export interface AgentResult {
   error?: string;
 }
 
-const same = (e: { command?: unknown; args?: unknown } | undefined) =>
-  !!e && e.command === SERVER.command && JSON.stringify(e.args ?? []) === JSON.stringify(SERVER.args);
+/**
+ * The entry for a GUI app (Cursor, Claude Desktop). It starts with a minimal PATH, where npx from nvm or
+ * Homebrew is not found: so the npx setup would run, by its absolute path, with node's directory on PATH
+ * (npx is a node script).
+ */
+export function guiServer(): Entry {
+  const win = process.platform === "win32";
+  const npx = onPath("npx") ?? [join(dirname(process.execPath), win ? "npx.cmd" : "npx")].find((f) => existsSync(f));
+  if (!npx) return SERVER;
+  const nodeDir = existsSync(join(dirname(npx), win ? "node.exe" : "node")) ? dirname(npx) : dirname(process.execPath);
+  return {
+    command: npx,
+    args: SERVER.args,
+    env: { PATH: (win ? [nodeDir] : [nodeDir, "/usr/bin", "/bin"]).join(delimiter) },
+  };
+}
+
+const same = (e: { command?: unknown; args?: unknown } | undefined, want: Entry = SERVER) =>
+  !!e && e.command === want.command && JSON.stringify(e.args ?? []) === JSON.stringify(want.args);
 
 /** Copies `file` to `<file>.bak-api-anything` once: a later run keeps the copy made before api-anything's first edit. */
 function backup(file: string): string | undefined {
@@ -113,15 +136,16 @@ const entryIn = (cfg: Record<string, unknown>) =>
   (cfg.mcpServers as Record<string, { command?: unknown; args?: unknown }> | undefined)?.[NAME];
 
 /** An `mcpServers` entry in a JSON config (Claude Code's ~/.claude.json, Cursor, Claude Desktop). */
-function jsonServer(agent: Agent, file: string, dryRun: boolean): AgentResult {
+function jsonServer(agent: Agent, file: string, dryRun: boolean, entry: Entry = SERVER): AgentResult {
   const cfg = readJsonFile(file);
   const cur = entryIn(cfg);
-  if (cur) return { agent, mcp: same(cur) ? "unchanged" : "kept", file, ...(same(cur) ? {} : { entry: cur }) };
+  if (cur)
+    return { agent, mcp: same(cur, entry) ? "unchanged" : "kept", file, ...(same(cur, entry) ? {} : { entry: cur }) };
   if (dryRun) return { agent, mcp: "would add", via: "file", file };
   const saved = backup(file);
   const servers = (cfg.mcpServers as Record<string, unknown> | undefined) ?? {};
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify({ ...cfg, mcpServers: { ...servers, [NAME]: SERVER } }, null, 2)}\n`);
+  writeFileSync(file, `${JSON.stringify({ ...cfg, mcpServers: { ...servers, [NAME]: entry } }, null, 2)}\n`);
   return { agent, mcp: "added", via: "file", file, ...(saved ? { backup: saved } : {}) };
 }
 
@@ -209,9 +233,9 @@ function connect(agent: Agent, dryRun: boolean): AgentResult {
       case "codex":
         return { ...codexServer(dryRun), ...installSkill(paths.codexSkill(), dryRun) };
       case "cursor":
-        return jsonServer("cursor", paths.cursorJson(), dryRun);
+        return jsonServer("cursor", paths.cursorJson(), dryRun, guiServer());
       case "claude-desktop":
-        return jsonServer("claude-desktop", paths.desktopJson(), dryRun);
+        return jsonServer("claude-desktop", paths.desktopJson(), dryRun, guiServer());
     }
   } catch (e) {
     return { agent, mcp: "failed", file: "", error: (e as Error).message.split("\n")[0] };
