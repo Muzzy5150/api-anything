@@ -22,11 +22,13 @@ import {
 import { buildRequest } from "./http.js";
 import { AmbiguousProfile } from "./import.js";
 import { type Candidate, capturePages, pageUrls, rankCandidates } from "./learn.js";
+import { learnSite } from "./learnsite.js";
 import { cookieNames, importSession, logout, resolveLoginTarget } from "./login.js";
 import { type Outline, outline } from "./outline.js";
 import { plan, submit, writeOutbox } from "./publish.js";
 import { pull, search } from "./registry.js";
 import { loadSession, loggedIn, saveSession, sessionFile, withLock } from "./session.js";
+import { AGENTS, type Agent, askYesNo, setup, summary } from "./setup.js";
 import { CheckSchema, HtmlRecipeSchema, MatchSchema, type Operation, type Param, TriggerStepSchema } from "./spec.js";
 import { exportSite, listSites, loadSite, siteNotes, updateSite } from "./store.js";
 import type { Exchange, TriggerStep } from "./types.js";
@@ -169,15 +171,40 @@ const HELP: Record<string, string> = {
   session value. --yes sends that preview, unchanged, with the GitHub CLI (gh, signed in): a fork, a
   branch, commits under your account's noreply address, and a public pull request under your account.
   --keep-examples keeps param examples you confirmed are public (so verify works for others).`,
-  mcp: `api-anything mcp [--allow-writes]
-  Serves list_sites, find_sites, list_operations, call_operation and login over stdio MCP. MCP cannot
-  learn operations (use capture/add here). list_operations pulls a shared site an agent asks for, with
-  its reads only: its writes need a human's api-anything pull. Its login only refreshes a session a
-  human imported here.`,
+  mcp: `api-anything mcp [--allow-writes] [--no-learn]
+  Serves list_sites, find_sites, list_operations, call_operation, login and learn_site over stdio MCP.
+  list_operations pulls a shared site an agent asks for, with its reads only: its writes need a human's
+  api-anything pull. Its login only refreshes a session a human imported here. learn_site learns a read
+  (as learn does); writes are learned here with add --write.
+  --no-learn   hide learn_site`,
+  setup: `api-anything setup [--yes | --no-share] [--agents claude-code,codex,cursor,claude-desktop] [--dry-run]
+  Connects the MCP server (npx -y api-anything mcp) to each agent found on this machine: Claude Code,
+  Codex, Cursor, Claude Desktop. Installs the skill for Claude Code (~/.claude/skills) and Codex
+  (~/.agents/skills). Checks for a Chromium browser, makes this install's key, and asks whether to help
+  build the shared catalog (default yes). Other entries in an agent's config are never changed; a file
+  is backed up to <file>.bak-api-anything before its first edit. Running it again changes nothing.
+  --yes        share: answer the question yes without asking
+  --no-share   do not share; answer the question no
+  --agents     connect these agents only, found or not
+  --dry-run    print what would change, and change nothing`,
+  learn: `api-anything learn <trigger> --args k=v --args2 k=v --args3 k=v [--site s] [--op o] [--intent text] [options]
+  Learns a read in one step and returns the answer to --args (as MCP learn_site does): runs the page with
+  --args and --args2, picks the request carrying them and the fields from the first run's outline, saves
+  the op with --args2 as its example, calls it with --args3 (kept as the op's check) and once with no
+  cookies, then shares it when sharing is on and it is public. A login op is shared only on your yes.
+  <trigger>   page URL with {param} placeholders, e.g. https://site.com/search?q={q}
+  --args      the values you want the answer for
+  --args2     another real value of the same kind (the op's shared example)
+  --args3     a third, different from both (the holdout check)
+  --from <id> --from2 <id>   learn again from an earlier learn's captures, with no browser
+  --pick-request <n>, --extract, --pick, --html, --embedded   choose the request and the recipe (see add)
+  Output: data, signature, chosen and alternatives (request and recipe), proof, shared.`,
 };
 
 const USAGE = `api-anything ${VERSION}: turn a website into operations an agent can call.
 
+  api-anything setup [--yes | --no-share] [--dry-run]
+  api-anything learn <url-template> --args k=v --args2 k=v --args3 k=v
   api-anything login <site|url> [--profile ... | --window | --cookies <file>]
   api-anything logout <site>
   api-anything capture <url> [--steps ...]
@@ -303,6 +330,16 @@ const OPTIONS = {
   max: { type: "string", multiple: true },
   expect: { type: "string" },
   purpose: { type: "string" },
+  args: { type: "string", multiple: true },
+  args2: { type: "string", multiple: true },
+  args3: { type: "string", multiple: true },
+  site: { type: "string" },
+  op: { type: "string" },
+  intent: { type: "string" },
+  agents: { type: "string" },
+  "dry-run": { type: "boolean" },
+  "no-share": { type: "boolean" },
+  "no-learn": { type: "boolean" },
 } as const;
 
 /** What a command gets: the flags, the positionals after the command name, and the parsed --steps. */
@@ -1016,7 +1053,57 @@ async function cmdPublish({ v, pos }: Parsed): Promise<number> {
   return 0;
 }
 
+async function cmdSetup({ v }: Parsed): Promise<number> {
+  if (v.yes && v["no-share"]) throw new Fail("--yes and --no-share contradict each other", "pass one of them");
+  const agents = v.agents?.split(",").map((a) => a.trim());
+  const unknown = agents?.filter((a) => !(AGENTS as readonly string[]).includes(a));
+  if (unknown?.length)
+    throw new Fail(
+      `unknown agent ${unknown.join(", ")}; the agents are ${AGENTS.join(", ")}`,
+      "api-anything setup --help",
+    );
+  const r = await setup({
+    agents: agents as Agent[] | undefined,
+    dryRun: v["dry-run"],
+    share: v.yes ? true : v["no-share"] ? false : undefined,
+    ask: process.stdin.isTTY && process.stderr.isTTY ? askYesNo : undefined,
+  });
+  out(r);
+  process.stderr.write(`${summary(r)}\n`);
+  return r.ok ? 0 : 1;
+}
+
+async function cmdLearn({ v, pos }: Parsed): Promise<number> {
+  const trigger = pos[0];
+  if (!trigger) throw new Fail("missing <trigger>", "api-anything learn --help");
+  if ((v.from === undefined) !== (v.from2 === undefined))
+    throw new Fail("--from and --from2 go together: the two captures of an earlier learn", "api-anything learn --help");
+  const r = await learnSite(
+    {
+      trigger,
+      args: kv(v.args),
+      args2: kv(v.args2),
+      args3: kv(v.args3),
+      ...(v.site ? { site: v.site } : {}),
+      ...(v.op ? { op: v.op } : {}),
+      ...(v.intent ? { intent: v.intent } : {}),
+      ...(v["pick-request"] !== undefined ? { pickRequest: Number(v["pick-request"]) } : {}),
+      ...(v.extract ? { extract: v.extract } : {}),
+      ...(v.pick ? { pick: splitPick(v.pick) } : {}),
+      ...(v.html ? { html: json(v.html, HtmlRecipeSchema, "html") } : {}),
+      ...(v.embedded ? { embedded: v.embedded } : {}),
+      ...(v.from && v.from2 ? { captures: [v.from, v.from2] as [string, string] } : {}),
+      ...(v.write ? { write: true } : {}),
+    },
+    { consent: process.stdin.isTTY && process.stderr.isTTY ? askYesNo : undefined },
+  );
+  out(r);
+  if (r.next) process.stderr.write(`next: ${r.next}\n`);
+  return r.ok ? 0 : 1;
+}
+
 async function cmdMcp({ v }: Parsed): Promise<number> {
+  if (v["no-learn"]) (await import("./mcp-learn.js")).learnTool.enabled = false;
   const { serveStdio } = await import("./mcp.js");
   await serveStdio({ allowWrites: v["allow-writes"] });
   return -1; // keep serving
@@ -1063,7 +1150,27 @@ const COMMANDS: Record<string, { run: (p: Parsed) => number | Promise<number>; f
   search: { run: cmdSearch, flags: [] },
   pull: { run: cmdPull, flags: [] },
   publish: { run: cmdPublish, flags: ["keep-examples", "yes"] },
-  mcp: { run: cmdMcp, flags: ["allow-writes"] },
+  mcp: { run: cmdMcp, flags: ["allow-writes", "no-learn"] },
+  setup: { run: cmdSetup, flags: ["yes", "no-share", "agents", "dry-run"] },
+  learn: {
+    run: cmdLearn,
+    flags: [
+      "args",
+      "args2",
+      "args3",
+      "site",
+      "op",
+      "intent",
+      "pick-request",
+      "extract",
+      "pick",
+      "html",
+      "embedded",
+      "from",
+      "from2",
+      "write",
+    ],
+  },
 };
 
 async function run(argv: string[]): Promise<number> {

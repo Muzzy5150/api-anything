@@ -251,6 +251,19 @@ export async function startFixture(): Promise<Fixture> {
           )
           .join("")}</ul></body></html>`,
       );
+    // a server-rendered search: every result carries the query, so the list is found from the example
+    if (p === "/shelf") {
+      const q = u.searchParams.get("q") ?? "";
+      return html(
+        200,
+        `<!doctype html><html><body><ul class="results">${[1, 2, 3]
+          .map(
+            (i) =>
+              `<li class="result"><a class="title" href="/b/${i}">${q} volume ${i}</a> <span class="year">${2000 + i}</span></li>`,
+          )
+          .join("")}</ul></body></html>`,
+      );
+    }
     if (p === `/static/app.${state.build}.js`) return send(res, 200, "application/javascript", appJs(state));
 
     if (p === "/login") {

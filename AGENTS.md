@@ -23,10 +23,19 @@ holds the evidence behind it, including the api-anything bugs that must not come
 | `src/session.ts`, `src/store.ts` | `~/.api-anything`: cookie jar, specs, heal log, state, write ledger, export |
 | `src/checks.ts` | `verify`: run each read's example and checks, judge pass/fail/inconclusive, keep the record `publish` gates on |
 | `src/vet.ts` | the shared rules a spec someone else wrote must pass: on pull, publish, load and in CI |
-| `src/registry.ts`, `src/publish.ts` | pull a shared spec from the registry (`sites/` on GitHub); publish one as a pull request via `gh` |
+| `src/registry.ts`, `src/publish.ts` | pull a shared spec from the registry; publish one |
 | `src/registry.ts` (index), `scripts/pages.ts` | the registry index CI serves on Pages; `search` and MCP `find_sites` read it |
+| `src/registry-api.ts` | the wire contract with the registry service: endpoints' types, request signing, version hashing |
+| `src/search.ts`, `src/domain.ts` | pure pieces the registry service shares: an op's summary, the index entry, query scoring; host to site |
+| `src/identity.ts` | the install's Ed25519 key, signed request headers, and `settings.json` (whether to share) |
+| `src/share.ts` | upload learned or healed ops to the registry (`shareOps`), with the client's evidence |
+| `src/report.ts` | report how calls went to the registry |
+| `src/clean.ts` | a call with no cookies or session values, over plain HTTP: whether an op is public |
+| `src/learnsite.ts` | `learn_site`: add's two runs with the user's args, the pick from the outline, a holdout call, a clean replay, then share |
+| `src/setup.ts` | `setup`: connect the MCP server and the skill to each agent, the key, the one question |
 | `src/login.ts`, `src/import.ts` | sign in by importing the everyday browser's cookies; re-import on `auth` |
-| `src/cli.ts`, `src/mcp.ts`, `src/index.ts` | entry points |
+| `src/cli.ts`, `src/mcp.ts`, `src/mcp-learn.ts`, `src/index.ts` | entry points; `mcp-learn.ts` is the MCP `learn_site` tool |
+| `registry/` | the registry service: a Cloudflare Worker with D1 (docs/REGISTRY.md) |
 
 ## Rules
 
