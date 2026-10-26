@@ -1,0 +1,497 @@
+/**
+ * One call that learns a read a site lacks, proves it and shares it (docs/REGISTRY.md, "Learning an
+ * operation that does not exist"). It is `add` with the user's args as example 1 and the agent's second
+ * value as example 2, the request and recipe taken from run 1's outline unless the agent chose them;
+ * then a holdout call through call(), a replay with no cookies, and shareOps.
+ */
+import { readFileSync } from "node:fs";
+import { browserAvailable, ProfileInUse } from "./browser.js";
+import { botWall, judge } from "./classify.js";
+import { cleanCall } from "./clean.js";
+import { asText } from "./codec.js";
+import { call, type NextCall } from "./execute.js";
+import { capOutput, extract } from "./extract.js";
+import {
+  type AddInput,
+  addOperation,
+  type CaptureFile,
+  capturePage,
+  fillTrigger,
+  loadCapture,
+  loginWall,
+  PROFILE_HINT,
+} from "./heal.js";
+import { buildRequest } from "./http.js";
+import { type Args, capturePages, pageUrls, rankCandidates } from "./learn.js";
+import { resolveLoginTarget } from "./login.js";
+import { outline } from "./outline.js";
+import type { Evidence } from "./registry-api.js";
+import { summarize } from "./search.js";
+import { safeName } from "./session.js";
+import { type ShareOutcome, shareOps } from "./share.js";
+import { CheckSchema, type Operation } from "./spec.js";
+import { loadSite, updateSite } from "./store.js";
+import type { Exchange } from "./types.js";
+
+const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
+  .version;
+
+export type Recipe = Pick<NonNullable<AddInput["response"]>, "extract" | "pick" | "html" | "embedded">;
+
+export interface LearnSiteInput {
+  /** a site name; default: named from the trigger's host, as `login <url>` names one */
+  site?: string;
+  /** the operation's name; default: from the trigger's path */
+  op?: string;
+  /** the page URL with `{param}` placeholders */
+  trigger: string;
+  /** the user's own request: run 1, and the data returned */
+  args: Args;
+  /** another real value of the same kind: run 2, and the op's stored (published) example */
+  args2: Args;
+  /** a third: the holdout call, recorded as the op's check */
+  args3: Args;
+  /** what the op is for; becomes its description unless it holds one of the user's values */
+  intent?: string;
+  /** a request id from run 1 (`chosen` and `alternatives` list them) */
+  pickRequest?: number;
+  extract?: string;
+  pick?: string[];
+  html?: Recipe["html"];
+  embedded?: string;
+  /** an earlier result's `captures` (run 1, run 2): learn again with other choices and no browser */
+  captures?: [string, string];
+  /** refused: a write is learned with the CLI's `add --write`, which intercepts it */
+  write?: boolean;
+}
+
+export interface LearnSiteOptions {
+  /** asks the user whether to share an op that needs their yes; undefined: they could not be asked */
+  consent?: (message: string) => Promise<boolean | undefined>;
+  minIntervalMs?: number;
+}
+
+interface Choice {
+  request: number;
+  method: string;
+  url: string;
+  type?: string;
+  carries?: string[];
+  recipe?: Recipe;
+  /** field -> sample, for a `pick` */
+  fields?: Record<string, string>;
+}
+
+export interface LearnSiteResult {
+  ok: boolean;
+  class?: "refused";
+  site?: string;
+  op?: string;
+  /** `name(params) -> fields` */
+  signature?: string;
+  /** the answer to the user's own request (run 1) */
+  data?: unknown;
+  truncated?: string;
+  chosen?: Choice & { recipe: Recipe; auto: boolean };
+  alternatives?: Choice[];
+  proof?: {
+    holdout: { args: Args; ok: boolean; class: string; tier?: 1 | 2 | 3; reason?: string };
+    cleanReplay: Evidence["cleanReplay"];
+    cleanReason?: string;
+  };
+  shared?: ShareOutcome;
+  warnings?: string[];
+  captures?: string[];
+  saved?: string;
+  error?: string;
+  next?: string;
+  nextCall?: NextCall;
+}
+
+/** Replaced by tests: the real shareOps belongs to the registry client. */
+export const hooks = { share: shareOps };
+
+const clip = (u: string) => (u.length > 160 ? `${u.slice(0, 157)}...` : u);
+const empty = (d: unknown) =>
+  d === undefined || d === null || (Array.isArray(d) && !d.length) || (typeof d === "object" && !Object.keys(d).length);
+
+/** The recipe run 1's outline suggests for one request, if it can read the example values out of it. */
+function suggest(e: Exchange, carries: string[], values: string[]): Pick<Choice, "recipe" | "fields"> | undefined {
+  const r = e.response;
+  const o = r?.body ? outline(r.contentType, r.body, values) : undefined;
+  if (!o) return undefined;
+  // a JSON answer is learnable only from a request that carries the args
+  if (o.json)
+    return carries.length && o.json.at
+      ? { recipe: o.json.extract ? { extract: o.json.extract } : {}, fields: o.json.fields }
+      : undefined;
+  if (o.list) return { recipe: { html: { items: o.list.items, fields: o.list.fields } }, fields: o.list.sample };
+  const block = o.embedded?.find((b) => b.at) ?? o.embedded?.find((b) => b.regex.startsWith("application/ld"));
+  if (block)
+    return {
+      recipe: { embedded: { regex: block.regex }, ...(block.extract ? { extract: block.extract } : {}) },
+      fields: block.fields,
+    };
+  return undefined;
+}
+
+/** The recipe reads something out of this answer. */
+function resolves(r: Recipe, body: string | undefined): boolean {
+  if (!body) return false;
+  try {
+    const d = extract({ format: r.html ? "html" : r.embedded ? "embedded" : "json", ...r }, body);
+    return !empty(d);
+  } catch {
+    return false;
+  }
+}
+
+/** A name from the trigger's last word of path (`/search?q=` -> search), else get<FirstParam>. */
+function opName(trigger: string, args: Args): string {
+  const word = new URL(trigger).pathname
+    .split("/")
+    .filter((s) => /^[A-Za-z][\w-]{2,}$/.test(s))
+    .at(-1);
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  if (word)
+    return word
+      .split(/[-_]+/)
+      .map((w, i) => (i ? cap(w) : w.toLowerCase()))
+      .join("");
+  return `get${cap((Object.keys(args)[0] ?? "page").replace(/[^\w]/g, ""))}`;
+}
+
+/**
+ * The op as if run 1 had been made with `args`: the request template holds the captured values where
+ * the params go (a call overwrites them), and those values are the user's own request.
+ */
+function asExample(op: Operation, args: Args): Operation {
+  const params = { ...op, slots: op.slots.filter((s) => s.param !== undefined) };
+  return {
+    ...op,
+    request: buildRequest(params, args, { cookies: [], values: {} }),
+    params: op.params.map((p) => ({ ...p, example: args[p.name] ?? p.example })),
+  };
+}
+
+/** The user's values (3+ characters) still in the op, in any common encoding: shared, they say what the user asked. */
+function revealed(op: Operation, args: Args): string[] {
+  const { learnedAt: _, ...rest } = op;
+  const text = JSON.stringify(rest).toLowerCase();
+  return Object.entries(args)
+    .filter(([, v]) => {
+      const s = asText(v).toLowerCase();
+      const forms = [s, encodeURIComponent(s).toLowerCase(), encodeURIComponent(s).replace(/%20/g, "+").toLowerCase()];
+      return s.length >= 3 && forms.some((f) => text.includes(f));
+    })
+    .map(([k]) => k);
+}
+
+function checkArgs(input: LearnSiteInput): string | undefined {
+  const keys = (a: Args) => Object.keys(a).sort().join(",");
+  if (!Object.keys(input.args ?? {}).length)
+    return "args is empty: give the value(s) the user asked for, by param name";
+  for (const [label, a] of [
+    ["args2", input.args2],
+    ["args3", input.args3],
+  ] as const) {
+    if (!a || keys(a) !== keys(input.args)) return `${label} must set the same params as args (${keys(input.args)})`;
+  }
+  const same = (a: Args, b: Args) => Object.keys(a).every((k) => asText(a[k]) === asText(b[k]));
+  if (same(input.args3, input.args) || same(input.args3, input.args2))
+    return "args3 must differ from args and args2: it is the holdout, used as neither example";
+  return undefined;
+}
+
+export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {}): Promise<LearnSiteResult> {
+  if (input.write)
+    return {
+      ok: false,
+      class: "refused",
+      error: "learn_site learns reads only: a write would be sent while it is learned",
+      next: "a write is learned with the CLI, which intercepts it: api-anything add <site> <op> --trigger <url> --example k=v --write, run by the user or in your shell",
+      nextCall: { action: "report" },
+    };
+  if (!/^https?:\/\//i.test(input.trigger ?? ""))
+    return {
+      ok: false,
+      error: "trigger must be a full http(s) page URL",
+      next: "pass the page URL with {param} placeholders",
+    };
+  const bad = checkArgs(input);
+  if (bad) return { ok: false, error: bad, next: "fix the args and call again", nextCall: { action: "fix_args" } };
+
+  let site: string;
+  try {
+    site = input.site ? safeName(input.site) : resolveLoginTarget(input.trigger).site;
+  } catch (e) {
+    return { ok: false, error: (e as Error).message, next: "pass site: a short name (letters, digits, . _ -)" };
+  }
+  const existing = loadSite(site)?.site;
+  let op = input.op ?? opName(input.trigger, input.args);
+  if (!input.op)
+    for (let n = 2; existing?.operations.some((x) => x.name === op && x.trigger.url !== input.trigger); n++)
+      op = `${opName(input.trigger, input.args)}${n}`;
+  const fail = (error: string, next: string, extra: Partial<LearnSiteResult> = {}): LearnSiteResult => ({
+    ok: false,
+    site,
+    op,
+    error,
+    next,
+    ...extra,
+  });
+
+  // the two runs: run 1 is the user's request, run 2 the second example
+  let c1: CaptureFile;
+  let c2: CaptureFile;
+  try {
+    if (input.captures) {
+      c1 = loadCapture(input.captures[0]);
+      c2 = loadCapture(input.captures[1]);
+    } else {
+      if (!browserAvailable())
+        return fail(
+          "learning needs a Chromium browser (Google Chrome, Brave, Edge or Chromium), and none is installed",
+          "ask the user to install one, or to set API_ANYTHING_BROWSER to any Chromium executable",
+          { nextCall: { action: "install_browser" } },
+        );
+      const url1 = fillTrigger({ url: input.trigger }, input.args).url;
+      c1 = await capturePage({ url: url1 });
+      const wall = loginWall(c1, url1);
+      if (wall)
+        return fail(
+          `the page landed on a sign-in page (${wall}): the site needs an account`,
+          `ask the user to run api-anything login ${site}; then learn again`,
+          { nextCall: { action: "login", site }, captures: [c1.id] },
+        );
+      c2 = await capturePage({ url: fillTrigger({ url: input.trigger }, input.args2).url });
+    }
+  } catch (e) {
+    if (e instanceof ProfileInUse) return fail(e.message, PROFILE_HINT, { nextCall: { action: "retry" } });
+    return fail((e as Error).message.split("\n")[0]!, "check the trigger URL, then learn again");
+  }
+  const captures = [c1.id, c2.id];
+
+  // the request and the recipe: the agent's, else the outline's
+  const values = Object.values(input.args).map(asText);
+  const ranked = rankCandidates(c1.exchanges, input.args, { pages: pageUrls(c1.exchanges, capturePages(c1)) });
+  const exchange = (id: number) => c1.exchanges.find((e) => e.id === id);
+  const options: Choice[] = ranked.slice(0, 6).map((c) => ({
+    request: c.id,
+    method: c.method,
+    url: clip(c.url),
+    ...(c.contentType ? { type: c.contentType.split(";")[0] } : {}),
+    ...(c.hits.length ? { carries: c.hits } : {}),
+    ...suggest(exchange(c.id)!, c.hits, values),
+  }));
+  const given: Recipe = {
+    ...(input.extract ? { extract: input.extract } : {}),
+    ...(input.pick?.length ? { pick: input.pick } : {}),
+    ...(input.html ? { html: input.html } : {}),
+    ...(input.embedded ? { embedded: { regex: input.embedded } } : {}),
+  };
+  const told = Object.keys(given).length > 0;
+  let chosen: Choice | undefined;
+  if (input.pickRequest !== undefined) {
+    const e = exchange(input.pickRequest);
+    if (!e)
+      return fail(`no request ${input.pickRequest} in run 1 (capture ${c1.id})`, "pick one of alternatives[].request", {
+        alternatives: options,
+        captures,
+        nextCall: { action: "relearn", site, op },
+      });
+    chosen = options.find((x) => x.request === e.id) ?? {
+      request: e.id,
+      method: e.request.method,
+      url: clip(e.request.url),
+      ...suggest(e, [], values),
+    };
+  } else if (told) chosen = options.find((x) => resolves(given, exchange(x.request)?.response?.body)) ?? options[0];
+  else chosen = options.find((x) => x.recipe);
+  const page = c1.exchanges.filter((e) => e.resourceType === "document" && e.response).at(-1)?.response;
+  const wall = page && botWall({ status: page.status, headers: page.headers, body: page.body ?? "" });
+  if (!chosen && wall)
+    return fail(
+      `the site served a bot challenge (${wall})`,
+      `ask the user to run api-anything login ${site} --window and clear it; then learn again`,
+      { captures, nextCall: { action: "login", site, mode: "window" } },
+    );
+  if (!chosen && page && page.status >= 400)
+    return fail(
+      `the page answered HTTP ${page.status}`,
+      page.status === 429 ? "the site is rate limiting: wait a few minutes, then learn again" : "check the trigger URL",
+      { captures, nextCall: page.status === 429 ? { action: "retry" } : { action: "fix_args" } },
+    );
+  if (!chosen)
+    return fail(
+      "no request in run 1 carries the example values in an answer that could be read: the data may need a click, a login, or other example values",
+      "look at alternatives, then learn again with captures (no browser), pickRequest and a recipe (extract and pick, html, or embedded)",
+      { alternatives: options, captures, nextCall: { action: "relearn", site, op } },
+    );
+  const recipe = told ? given : (chosen.recipe ?? {});
+  const alternatives = options.filter((x) => x.request !== chosen.request).slice(0, 5);
+  const shown = { ...chosen, recipe, auto: input.pickRequest === undefined && !told };
+
+  // add, with the same functions, credential checks and refusals
+  const warnings: string[] = [];
+  const mentions =
+    input.intent && values.some((v) => v.length >= 3 && input.intent!.toLowerCase().includes(v.toLowerCase()));
+  if (mentions)
+    warnings.push("intent holds one of the user's values, so it is not the op's description (that is shared)");
+  let added: Awaited<ReturnType<typeof addOperation>>;
+  try {
+    added = await addOperation({
+      site,
+      op,
+      trigger: { url: input.trigger },
+      examples: [input.args, input.args2],
+      ...(input.intent && !mentions ? { description: input.intent } : {}),
+      response: recipe,
+      from: { capture: c1, id: chosen.request },
+      from2: c2,
+    });
+  } catch (e) {
+    const m = (e as Error).message.split("\n")[0]!;
+    const login = /api-anything login/.test(m);
+    return fail(
+      m,
+      login
+        ? `ask the user to run api-anything login ${site}; then learn again`
+        : "learn again with captures (no browser) and another pickRequest from alternatives, or a recipe",
+      {
+        chosen: shown,
+        alternatives,
+        captures,
+        nextCall: login ? { action: "login", site } : { action: "relearn", site, op },
+      },
+    );
+  }
+  warnings.push(...added.warnings);
+
+  // the user's answer, from run 1
+  const res = exchange(chosen.request)!.response!;
+  const j = judge(added.operation, {
+    status: res.status,
+    headers: res.headers,
+    body: res.body ?? "",
+    url: exchange(chosen.request)!.request.url,
+  });
+  if (j.class !== "ok" || empty(j.data))
+    return fail(
+      `the op was saved, but on run 1's answer it reads ${j.class === "ok" ? "no data" : `${j.class}: ${j.reason}`}`,
+      "learn again with captures (no browser) and another pickRequest from alternatives, or a recipe",
+      { chosen: shown, alternatives, captures, warnings, nextCall: { action: "relearn", site, op } },
+    );
+  const answer = capOutput(j.data);
+
+  // the shared example is args2, never the user's own request
+  const saved = updateSite(site, (cur) => ({
+    ...cur!,
+    operations: cur!.operations.map((x) => {
+      if (x.name !== op) return x;
+      try {
+        return asExample(x, input.args2);
+      } catch {
+        return x; // the user's values stay, and `revealed` keeps it from being shared
+      }
+    }),
+  }));
+
+  const holdout = await call(site, op, input.args3, { minIntervalMs: o.minIntervalMs });
+  const held = holdout.ok && !empty(holdout.data);
+  const check = CheckSchema.safeParse({
+    args: input.args3,
+    expect: "result",
+    purpose: "a value used as neither example when it was learned",
+  });
+  if (held && check.success)
+    updateSite(site, (cur) => ({
+      ...cur!,
+      operations: cur!.operations.map((x) => {
+        if (x.name !== op) return x;
+        const key = JSON.stringify(Object.entries(check.data.args).sort());
+        const rest = (x.checks ?? []).filter((c) => JSON.stringify(Object.entries(c.args).sort()) !== key);
+        return { ...x, checks: [...rest, check.data] };
+      }),
+    }));
+  else if (held)
+    warnings.push("args3 has a value that is not text, a number or a boolean, so it is not kept as a check");
+
+  const now = loadSite(site)!.site.operations.find((x) => x.name === op)!;
+  // a minTier 3 op needs the page for every call: plain HTTP says nothing about whether it is public
+  const clean =
+    now.minTier > 1 ? undefined : await cleanCall(now, input.args2, { site, minIntervalMs: o.minIntervalMs });
+  const cleanReplay: Evidence["cleanReplay"] = !clean ? "skipped" : clean.class === "ok" ? "ok" : "failed";
+
+  const proof: NonNullable<LearnSiteResult["proof"]> = {
+    holdout: {
+      args: input.args3,
+      ok: held,
+      class: holdout.ok && !held ? "empty" : holdout.class,
+      ...(holdout.tier ? { tier: holdout.tier } : {}),
+      ...(!held && holdout.reason ? { reason: holdout.reason } : {}),
+    },
+    cleanReplay,
+    ...(clean && clean.class !== "ok" ? { cleanReason: clean.reason } : {}),
+  };
+
+  let shared: ShareOutcome;
+  let next: string | undefined;
+  const reveals = revealed(now, input.args);
+  if (!held) {
+    shared = { site, op, shared: false, reason: "the holdout call did not answer with data" };
+    next = `it answered the user's request, but not args3: if args3 has results on the site, the op may be wrong; learn again with captures ${captures.join(" ")} and another pickRequest or recipe`;
+  } else if (reveals.length) {
+    shared = {
+      site,
+      op,
+      shared: false,
+      reason: `the learned request keeps the user's ${reveals.join(", ")} literally, so sharing it would say what they asked`,
+    };
+  } else {
+    const evidence: Partial<Evidence> = {
+      clientVersion: VERSION,
+      learnedLoggedIn: now.learnedLoggedIn,
+      cleanReplay,
+      holdout: { args: input.args3, ok: true, ...(holdout.tier ? { tier: holdout.tier } : {}) },
+      ...(holdout.tier ? { tier: holdout.tier } : {}),
+    };
+    // the user has their answer whatever sharing does
+    const share = async (consent?: true): Promise<ShareOutcome> => {
+      try {
+        const [one] = await hooks.share(site, [op], { evidence, ...(consent ? { consent } : {}) });
+        return one ?? { site, op, shared: false, reason: "sharing answered nothing" };
+      } catch (e) {
+        return { site, op, shared: false, reason: (e as Error).message.split("\n")[0] };
+      }
+    };
+    shared = await share();
+    if (shared.needsConsent) {
+      const yes = await o
+        .consent?.(
+          `${site} ${op} ${shared.reason ? `(${shared.reason}) ` : ""}works. Share it with the api-anything catalog? Other people's agents get the request's shape and the example values ${JSON.stringify(input.args2)}, never your cookies, your session or what you asked.`,
+        )
+        .catch(() => undefined);
+      if (yes) shared = await share(true);
+      else if (yes === undefined)
+        next = `ask the user whether to share ${op} with the catalog (${shared.reason ?? "it needs their yes"}); only on their yes, run: api-anything publish ${site} ${op} --yes`;
+    }
+  }
+
+  return {
+    ok: true,
+    site,
+    op,
+    signature: summarize(now).op,
+    data: answer.data,
+    ...(answer.truncated ? { truncated: answer.truncated } : {}),
+    chosen: shown,
+    alternatives,
+    proof,
+    shared,
+    warnings,
+    captures,
+    saved,
+    ...(next ? { next } : {}),
+  };
+}

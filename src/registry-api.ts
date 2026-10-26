@@ -6,14 +6,14 @@
 import type { Operation } from "./spec.js";
 
 /** Production registry; API_ANYTHING_REGISTRY overrides it (https, or http to this machine for tests). */
-export const REGISTRY_API = "https://api-anything-registry.workers.dev";
+export const REGISTRY_API = "https://api-anything-registry.forth-site.workers.dev";
 
 /**
  * - candidate: uploaded, served to others (marked) while no live version of the op exists
  * - live: confirmed by other installs; the default answer
  * - degraded: failing across installs; served only when nothing better exists
  * - review: outside the automatic rules (a login, a write, another site's host); served only to its uploader
- * - archived: no successful call in 30 days, or replaced; never served
+ * - archived: a candidate or degraded version with no ok report in 30 days, or one a newer live version replaced; never served
  * - blocked: a maintainer's kill switch; never served
  */
 export type Status = "candidate" | "live" | "degraded" | "review" | "archived" | "blocked";

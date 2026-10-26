@@ -26,8 +26,15 @@ holds the evidence behind it, including the api-anything bugs that must not come
 | `src/registry.ts` | the registry service's client (`docs/REGISTRY.md`, wire contract `src/registry-api.ts`): `pull`, `search`, the bundled upgrade |
 | `src/publish.ts`, `src/share.ts` | what an upload sends and the scans before it (`publish` previews it); `shareOps` sends what the rules allow, signed; the heal-back |
 | `src/report.ts`, `src/background.ts` | reports of calls of registry versions, in the background; an idle MCP server's verification of candidates |
+| `src/registry-api.ts` | the wire contract with the registry service: endpoints' types, request signing, version hashing |
+| `src/search.ts`, `src/domain.ts` | pure pieces the registry service shares: an op's summary, the index entry, query scoring; host to site |
+| `src/identity.ts` | the install's Ed25519 key, signed request headers, and `settings.json` (whether to share) |
+| `src/clean.ts` | a call with no cookies or session values, over plain HTTP: whether an op is public |
+| `src/learnsite.ts` | `learn_site`: add's two runs with the user's args, the pick from the outline, a holdout call, a clean replay, then share |
+| `src/setup.ts` | `setup`: connect the MCP server and the skill to each agent, the key, the one question |
 | `src/login.ts`, `src/import.ts` | sign in by importing the everyday browser's cookies; re-import on `auth` |
-| `src/cli.ts`, `src/mcp.ts`, `src/index.ts` | entry points |
+| `src/cli.ts`, `src/mcp.ts`, `src/mcp-learn.ts`, `src/index.ts` | entry points; `mcp-learn.ts` is the MCP `learn_site` tool |
+| `registry/` | the registry service: a Cloudflare Worker with D1 (docs/REGISTRY.md) |
 
 ## Rules
 

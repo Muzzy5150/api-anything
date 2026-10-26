@@ -2,11 +2,18 @@
 
 [![CI](https://github.com/goodnight000/api-anything/actions/workflows/ci.yml/badge.svg)](https://github.com/goodnight000/api-anything/actions/workflows/ci.yml)
 
-**Teach your agent a website once. After that, it calls the site like an API instead of driving a browser.**
+**Your agent uses websites through their own data requests, over plain HTTP, instead of driving a browser.**
 
-API Anything watches a site's own page make a request and learns which parts of it are your
-inputs. It saves the result as an operation. Your agent calls that operation with new inputs
-over MCP, the CLI or TypeScript, and gets JSON back over plain HTTP.
+```sh
+npx -y api-anything setup
+```
+
+Then ask your agent for something on any website. If someone already turned that site into
+operations, the agent finds them in the shared catalog and calls one. If nobody has, the agent
+learns the operation in one tool call, gives you the answer, and shares the operation so the next
+person's agent doesn't have to learn it. Every call reports whether the operation still works, so
+the agents that use an operation also check it, and an operation that breaks is repaired by the
+next agent that meets the failure.
 
 [![Two agents race on the same Google Flights task: one drives Chrome, one calls API Anything](docs/media/agent-race.gif)](docs/media/agent-race.mp4)
 
@@ -23,53 +30,78 @@ Across 5 runs of each task, the agent using API Anything answered 1.5 to 2× soo
 half as many tokens, and cost the same or less. All 20 answers were correct.
 [Method, raw numbers and limits](bench/README.md).
 
-## Install
+## Setup
 
-Paste this into Claude Code, Codex or another coding agent:
+`npx -y api-anything setup` needs Node 22.13 or newer. It:
 
-```text
-Set up API Anything for me: https://github.com/goodnight000/api-anything/blob/main/INSTALL.md
-```
+- finds the agents on your machine (Claude Code, Codex, Cursor, Claude Desktop) and connects the MCP
+  server to each, with the agent's own `mcp add` command where it has one. It adds the skill to the
+  agents that take skills. Other entries in their configs are left alone, and each file is backed
+  up to `<file>.bak-api-anything` before its first edit;
+- checks for a Chromium browser (Chrome, Brave, Edge, Chromium, Vivaldi, Arc). One is needed only to
+  learn sites; calling shared operations works without it;
+- makes this install's key (`~/.api-anything/key.json`). There is no account;
+- asks one question: help build the shared catalog? The default is yes. See [Sharing](#sharing).
 
-The agent checks Node 22.13+, builds and installs the `api-anything` command, confirms that a
-call works, then connects the MCP server and the skill to itself. Restart the agent, then ask it
-something like "What does Goodreads rate Piranesi?"
+Run it again at any time: it changes only what is missing. `--dry-run` prints what it would change,
+`--yes` or `--no-share` answer the question without asking, and `--agents claude-code,codex` limits
+it to those agents. Restart the agent afterwards, then ask it something like "What does Goodreads
+rate Piranesi?" [Setup details](docs/QUICKSTART.md) · [for an agent installing it](INSTALL.md)
 
-<details>
-<summary>Install by hand</summary>
+## How your agent uses it
 
-The package isn't on npm yet. Don't use `npm install -g github:...`, because it fails under npm 11.
+The MCP server gives the agent six tools:
+
+1. `find_sites` searches the shared catalog and this machine's sites by what the agent needs ("book
+   ratings"), a domain or a URL, and answers with each match's operations and their params.
+2. `call_operation` calls one. The call runs on your machine: plain HTTP first, the browser only if
+   the site needs it. A site from the catalog is fetched on first use, with its reads only.
+3. When nothing matches, `learn_site` learns the operation. The agent gives the page URL with a
+   placeholder (`https://site.com/search?q={q}`), your value, and two other values of the same kind.
+   API Anything loads the page with your value and the second one, picks the data request and the
+   fields, calls the new operation with the third value, and replays it once with no cookies. You
+   get the answer in the same call. A public read is then shared.
+4. `list_sites`, `list_operations` and `login` cover the rest: what is installed, an operation's
+   params, and refreshing a session for a site that needs your account.
+
+Learning happens in a headless browser on your machine. The agent picks the values; API Anything
+builds the request template without an LLM.
+
+## Sharing
+
+With sharing on, this is what leaves your machine:
+
+- **Operations learned from public pages.** An operation is shared automatically only when it is a
+  read, it was learned signed out, and the replay with no cookies worked. Its stored example is the
+  agent's second value and its check is the third, never what you asked. Cookies and tokens are
+  references in an operation (`cookie:name`), never their values, and a spec holding a live
+  credential is refused before it is saved.
+- **An operation that needed your login** is shared only after you say yes. The agent asks you
+  (through the MCP client's prompt where it supports one), and the command it runs is
+  `api-anything publish <site> <op> --yes`.
+- **Reports.** After a call: which version of the operation ran, the outcome, the transport tier
+  and the time. No arguments and no data.
+- **Background checks.** An idle MCP server calls a few new operations a day (at most 20) with their
+  published examples, over plain HTTP with no cookies, and reports the outcome.
+- **Repairs.** When a call heals a public operation that drifted, the repaired version is shared.
+
+A new operation is a candidate until installs other than its uploader report it working from
+different networks; then it is served as live. Operations that write, that needed a login, or that
+send to another site's host are never promoted by reports. With sharing off
+(`api-anything setup --no-share`), nothing is shared or reported, and the catalog still works for
+reads. [How the catalog works](docs/REGISTRY.md)
+
+## Teach it a site from the CLI
+
+`learn` is `learn_site` on the command line:
 
 ```sh
-git clone https://github.com/goodnight000/api-anything.git && cd api-anything
-npm ci && npm install -g "$(npm pack --silent)"
-api-anything call hacker-news search query=sqlite
+api-anything learn 'https://lobste.rs/domains/{domain}' \
+  --args domain=github.com --args2 domain=arxiv.org --args3 domain=youtube.com
 ```
 
-```json
-{"ok":true,"class":"ok","tier":1,"data":[{"title":"Hosting SQLite databases on GitHub Pages or any static file hoster","url":"https://phiresky.github.io/blog/2021/hosting-sqlite-databases-on-github-pages/", ...}, ...],"ms":111}
-```
-
-`tier: 1` means plain HTTP with no browser. A failure returns `ok: false` with a `class`, a
-`reason` and a `next` step. Connect an agent with `codex mcp add api-anything -- api-anything mcp`,
-`claude mcp add --scope user api-anything -- api-anything mcp`, or this MCP entry:
-
-```json
-{ "mcpServers": { "api-anything": { "command": "api-anything", "args": ["mcp"] } } }
-```
-
-</details>
-
-Over MCP an agent **calls** operations, using five tools: `list_sites`, `find_sites`,
-`list_operations`, `call_operation` and `login`. `find_sites` searches the shared registry, and
-`list_operations` pulls a shared site the first time an agent asks for it, with its reads only. To **create** operations, an agent needs a shell and the
-[skill](skills/api-anything/SKILL.md). A Chromium browser is needed only for creating operations
-and for the browser tier — Google Chrome by default, or Brave, Edge, Chromium, Vivaldi, Arc; any
-Chromium executable works via `API_ANYTHING_BROWSER`. [Setup details](docs/QUICKSTART.md).
-
-## Teach it a new site
-
-Give it the page URL with a placeholder, and two example inputs:
+For control over every step (UI steps, a pinned request, a write), `add` takes the trigger, two
+examples and the recipe:
 
 ```sh
 api-anything add hn-demo links \
@@ -81,33 +113,9 @@ api-anything call hn-demo links domain=arxiv.org      # 30 arxiv.org stories, ti
 ```
 
 The headless browser loads the page once for each example. The part of the request that changed with
-the input becomes a parameter, and the rest is stored as a template. The agent (or you) picks the
-request and the fields. API Anything builds the template without an LLM.
+the input becomes a parameter, and the rest is stored as a template. Writes are learned only with
+`add --write`, which aborts the request in the browser, so learning never performs the action.
 [Recorded demos](docs/demos/README.md).
-
-## Use and share specs
-
-Someone may have learned the site already. `search` looks through the registry (this repository's
-`sites/`) by what you need, a domain or a URL, and `pull` fetches a spec, checked against the shared
-rules first:
-
-```sh
-api-anything search book ratings        # or goodreads.com, or a page's URL
-api-anything pull goodreads
-api-anything call goodreads searchBooks q=piranesi
-```
-
-To share one you learned, `publish` previews exactly what would become public: the files, every
-host the spec sends to, and anything that may be yours, such as an email or an account id. Nothing
-is sent until you add `--yes`. Then it opens a pull request from your fork with the GitHub CLI,
-committed under your account's noreply address. A maintainer reviews it, CI runs the same rules,
-and once it merges anyone can pull it. The pull request carries what `verify` answered, and
-`publish` refuses an op whose recorded checks (`api-anything check`) fail.
-
-```sh
-api-anything publish hn-demo            # preview only
-api-anything publish hn-demo --yes      # open the pull request
-```
 
 ## Map a site from an intent
 
@@ -145,7 +153,7 @@ api-anything call goodreads getBook bookId=50202953
 
 ## What's included
 
-22 read operations across 9 sites:
+22 read operations across 9 sites ship with the package:
 
 - `google-flights`: search, top flights, price calendar
 - `hacker-news`
@@ -155,7 +163,7 @@ api-anything call goodreads getBook bookId=50202953
 - `goodreads`: search, books, author lists and reviews, built by the explorer above
 
 They cover selected features, not whole sites. `api-anything ops <site>` lists parameters and
-caveats.
+caveats. Everything else comes from the shared catalog or is learned when first needed.
 
 ## How it works
 
@@ -168,8 +176,10 @@ caveats.
 - **Repair.** If the request stops working (a rotated id, a moved field), re-learn it and save
   the new version only after a replay succeeds. Otherwise the call returns an error, not
   someone else's data.
+- **Share.** Learned and repaired public reads go to the catalog with what the client proved about
+  them; calls report outcomes, and the catalog serves the version that works for the most installs.
 
-[Details](docs/REFERENCE.md#replay-fallback-and-repair) · [design](docs/DESIGN.md)
+[Details](docs/REFERENCE.md#replay-fallback-and-repair) · [design](docs/DESIGN.md) · [catalog](docs/REGISTRY.md)
 
 ## Sessions and logins
 
@@ -199,15 +209,20 @@ window. [Details](docs/REFERENCE.md#logging-in)
 
 ## Limits
 
-- It is a local tool, not a hosted API. It uses your machine, your network and your sessions.
-- It knows only the operations it was taught. It doesn't support every feature of every site.
+- It is a local tool, not a hosted API. Calls use your machine, your network and your sessions.
+- `learn_site` learns from one page load per value, from a URL template. A site whose data appears
+  only after clicks or typing, or only on in-app navigation, needs the CLI's `capture` and `add`
+  with `--steps` or `--soft-from`. It learns reads only.
+- A shared operation is someone else's work. Candidates are served marked as such until other
+  installs confirm them, and an operation that worked for others can still fail for you (a
+  different region, a block on your network).
 - Repair can fail. There is no CAPTCHA solving, and if a site challenges real Chrome, you have
   to clear the challenge by hand.
-- `verify` proves an op only as far as its examples and checks go: two to three cases a human
-  confirmed, not a test suite. A spec without them is published unverified.
-- No write operations are bundled. LinkedIn messaging isn't bundled and hasn't been tested
-  against LinkedIn. Writes are tested only against a local fixture, and they need
-  `--allow-writes`. An HTTP 2xx doesn't prove a message was delivered.
+- An operation is proven only as far as its examples and checks go: a holdout value and the
+  reports of the installs that called it, not a test suite.
+- No write operations are bundled, and writes are never shared automatically. Writes are tested
+  only against a local fixture, and they need `--allow-writes`. An HTTP 2xx doesn't prove a
+  message was delivered.
 - Credentials stay in `~/.api-anything`, and specs hold references, never values. Read each
   site's terms: you are responsible for how you use it.
 
@@ -215,8 +230,8 @@ window. [Details](docs/REFERENCE.md#logging-in)
 
 ## Docs
 
-[Benchmark](bench/README.md) · [Demos](docs/demos/README.md) · [Setup for agents](docs/QUICKSTART.md) ·
-[Reference](docs/REFERENCE.md) · [Design](docs/DESIGN.md) · [Release checks](docs/RELEASE-READINESS.md) ·
-[Contributing](CONTRIBUTING.md)
+[Setup](docs/QUICKSTART.md) · [For agents installing it](INSTALL.md) · [Catalog design](docs/REGISTRY.md) ·
+[Benchmark](bench/README.md) · [Demos](docs/demos/README.md) · [Reference](docs/REFERENCE.md) ·
+[Design](docs/DESIGN.md) · [Release checks](docs/RELEASE-READINESS.md) · [Contributing](CONTRIBUTING.md)
 
 MIT licensed.

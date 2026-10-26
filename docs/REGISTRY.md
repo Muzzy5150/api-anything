@@ -36,7 +36,7 @@ The answer is `settings.json` `share: true|false` (default yes). No account.
 ## Learning an operation that does not exist
 
 1. `find_sites` finds nothing, or the site lacks the op. Its `nextCall` is `learn_site`.
-2. `learn_site {page URL template, args, args2?, intent}` (MCP; CLI `learn`) runs the page with the
+2. `learn_site {page URL template, args, args2, args3, intent}` (MCP; CLI `learn`) runs the page with the
    user's own args, picks the request and the fields from the outline (the agent can override), runs
    it again with a second example, and returns the data of the user's own request with the op saved.
 3. The client proves it before sharing (`learnsite.ts`):
