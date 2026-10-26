@@ -1073,11 +1073,13 @@ independent alternative.
   persisted query named by a hash or an id, is refused since it may be a mutation), before the holdout
   call or the clean replay sends anything; the automatic pick passes over such a request for one that reads. Over MCP the trigger
   must pass `badAddress` (page text may steer the agent to a page on this machine or the local network);
-  the CLI takes any address, the user typed it. A new site's default name is what the registry names a
-  new site, its registrable domain with dots as dashes (`slugOf`: crates.io is `crates-io`), unless this
-  machine has a site on that host already. A local site under another name goes up under that slug
-  (`registryName`: a pulled or bundled site keeps the name the registry holds), and the share outcome's
-  `as` names it. `find_sites` shows every match's `domain`, local or the registry's; its description and
+  the CLI takes any address, the user typed it. A new site's default name is a site this machine has on
+  that host, else the name the registry already serves its registrable domain under (`sharedName`, a
+  search for the domain; a seed keeps its own name, goodreads.com is `goodreads`, and a new op under a
+  parallel name would go to review), else what the registry names a new site: the domain with dots as
+  dashes (`slugOf`: crates.io is `crates-io`). A local site goes up under its own name when it is pulled
+  or bundled or the registry serves its domain under that name, else under the slug (`registryName`,
+  `uploadName`, asked only when something may go up), and the share outcome's `as` names it. `find_sites` shows every match's `domain`, local or the registry's; its description and
   `next`, `call_operation`'s description and the skill tell the agent to check it is the site the user
   means before calling, since a name or description can imitate another site. When a share
   needs the user's yes, the prompt (MCP elicitation or the CLI's) and the `next` that tells the agent to

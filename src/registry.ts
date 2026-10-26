@@ -276,6 +276,28 @@ const SearchMatchSchema = z.object({
   operations: z.array(FoundOpSchema).max(LIMITS.operations),
 });
 
+/**
+ * The name the registry already serves a site of `domain` under, if any: a seed keeps its own (goodreads.com
+ * is goodreads, ycombinator.com is hacker-news), and a new op uploaded under another name on that domain
+ * would go to review. Undefined when there is none or the registry cannot be reached.
+ */
+export async function sharedName(domain: string, o: { signal?: AbortSignal } = {}): Promise<string | undefined> {
+  try {
+    const r = await registryRequest<{ matches?: unknown }>(`/v1/search?q=${encodeURIComponent(domain)}&limit=10`, {
+      cap: 4 * 1024 * 1024,
+      timeoutMs: 5000,
+      signal: o.signal,
+    });
+    for (const m of Array.isArray(r.matches) ? r.matches : []) {
+      const p = SearchMatchSchema.safeParse(m);
+      if (p.success && p.data.domain === domain) return p.data.name;
+    }
+  } catch {
+    // no answer: the caller names it as the registry names a new site
+  }
+  return undefined;
+}
+
 /** One op of a search answer: enough to call it. A local op that is no registry version has no status. */
 export interface FoundOperation {
   name: string;

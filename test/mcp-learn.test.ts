@@ -14,6 +14,7 @@ import { learnTool } from "../src/mcp-learn.js";
 import { HOLDOUT_PURPOSE } from "../src/share.js";
 import { loadSite } from "../src/store.js";
 import { notARead } from "../src/vet.js";
+import { startRegistry } from "./fixture/registry.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -376,8 +377,16 @@ test("MCP learn_site loads only https pages on a public host; the CLI's learn ta
   assert.match(r.error ?? "", /no capture "none-1"/);
 });
 
-test("a new site is named as the registry names it: its registrable domain with dots as dashes", async () => {
+test("a new site is named as the registry names it: the name it serves the domain under, else the domain with dots as dashes", async () => {
   process.env.API_ANYTHING_HOME = mkdtempSync(join(tmpdir(), "aa-learn-name-"));
+  const reg = await startRegistry();
+  const was = process.env.API_ANYTHING_REGISTRY;
+  process.env.API_ANYTHING_REGISTRY = reg.url;
+  // the registry serves shelfari.com as shelf (as a seed keeps its name), and a lookalike on another domain
+  reg.matches = [
+    { name: "goodreads-reviews", domain: "example.net", operations: [] },
+    { name: "shelf", domain: "shelfari.com", operations: [] },
+  ];
   const learn = (trigger: string, site?: string) =>
     learnSite({
       trigger,
@@ -387,6 +396,24 @@ test("a new site is named as the registry names it: its registrable domain with 
       args3: { q: "ccc" },
       captures: ["none-1", "none-2"],
     });
+  try {
+    await names(reg, learn);
+  } finally {
+    if (was === undefined) delete process.env.API_ANYTHING_REGISTRY;
+    else process.env.API_ANYTHING_REGISTRY = was;
+    await reg.close();
+  }
+});
+
+async function names(
+  reg: Awaited<ReturnType<typeof startRegistry>>,
+  learn: (trigger: string, site?: string) => ReturnType<typeof learnSite>,
+) {
+  assert.equal((await learn("https://www.shelfari.com/search?q={q}")).site, "shelf");
+  assert.ok(
+    reg.received.some((r) => r.path === "/v1/search?q=shelfari.com&limit=10"),
+    "the registry was asked for the domain",
+  );
   assert.equal((await learn("https://www.crates.io/search?q={q}")).site, "crates-io");
   assert.equal((await learn("https://search.lobste.rs/s?q={q}")).site, "lobste-rs");
   assert.equal(
@@ -397,4 +424,8 @@ test("a new site is named as the registry names it: its registrable domain with 
   assert.equal((await learn("https://docs.example.co.uk/s?q={q}")).site, "example-co-uk");
   // a name the user gives is theirs: shareOps uploads it under the registry's name
   assert.equal((await learn("https://crates.io/search?q={q}", "rust")).site, "rust");
-});
+  // a local trigger is never shared, so the registry is not asked about it
+  const asked = reg.received.length;
+  await learn("http://127.0.0.1:1/s?q={q}");
+  assert.equal(reg.received.length, asked);
+}

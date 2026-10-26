@@ -9,7 +9,7 @@ import { browserAvailable, ProfileInUse } from "./browser.js";
 import { botWall, judge } from "./classify.js";
 import { cleanCall } from "./clean.js";
 import { asText } from "./codec.js";
-import { slugOf } from "./domain.js";
+import { siteOf, slugOf } from "./domain.js";
 import { call, type NextCall } from "./execute.js";
 import { capOutput, extract } from "./extract.js";
 import {
@@ -27,6 +27,7 @@ import { buildRequest } from "./http.js";
 import { type Args, capturePages, pageUrls, rankCandidates } from "./learn.js";
 import { resolveLoginTarget } from "./login.js";
 import { outline } from "./outline.js";
+import { sharedName } from "./registry.js";
 import type { Evidence } from "./registry-api.js";
 import { summarize } from "./search.js";
 import { safeName } from "./session.js";
@@ -34,7 +35,7 @@ import { HOLDOUT_PURPOSE, type ShareOutcome, shareOps } from "./share.js";
 import { CheckSchema, type Operation } from "./spec.js";
 import { loadSite, updateSite } from "./store.js";
 import type { Exchange } from "./types.js";
-import { notARead } from "./vet.js";
+import { badAddress, notARead } from "./vet.js";
 
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
   .version;
@@ -192,11 +193,18 @@ function revealed(op: Operation, args: Args): string[] {
 
 /**
  * The site a trigger learns into by default: a site this machine has on that host (its session is
- * there), else a new one named as the registry names it (`slugOf`: crates.io is crates-io).
+ * there), else the name the registry already serves the domain under (a seed's: goodreads.com is
+ * goodreads), else a new one named as the registry names it (`slugOf`: crates.io is crates-io).
  */
-function defaultSiteName(trigger: string): string {
+async function defaultSiteName(trigger: string): Promise<string> {
   const found = resolveLoginTarget(trigger).site;
-  return loadSite(found) ? found : safeName(slugOf(new URL(trigger).hostname));
+  if (loadSite(found)) return found;
+  const host = new URL(trigger).hostname;
+  const domain = siteOf(host);
+  // a page on this machine or the network is never shared: the registry is not asked about it
+  const shared = badAddress(trigger) ? undefined : await sharedName(domain);
+  const taken = shared && loadSite(shared)?.site;
+  return safeName(shared && !(taken && siteOf(new URL(taken.baseUrl).hostname) !== domain) ? shared : slugOf(host));
 }
 
 /** A captured request as an op with no slots yet, for `notARead`. */
@@ -242,7 +250,7 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
 
   let site: string;
   try {
-    site = input.site ? safeName(input.site) : defaultSiteName(input.trigger);
+    site = input.site ? safeName(input.site) : await defaultSiteName(input.trigger);
   } catch (e) {
     return { ok: false, error: (e as Error).message, next: "pass site: a short name (letters, digits, . _ -)" };
   }

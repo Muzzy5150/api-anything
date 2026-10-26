@@ -25,7 +25,7 @@ import { type Candidate, capturePages, pageUrls, rankCandidates } from "./learn.
 import { learnSite } from "./learnsite.js";
 import { cookieNames, importSession, logout, resolveLoginTarget } from "./login.js";
 import { type Outline, outline } from "./outline.js";
-import { plan } from "./publish.js";
+import { plan, uploadName } from "./publish.js";
 import { pull, search } from "./registry.js";
 import { settle } from "./report.js";
 import { loadSession, loggedIn, saveSession, sessionFile, withLock } from "./session.js";
@@ -1021,7 +1021,7 @@ async function cmdPublish({ v, pos }: Parsed): Promise<number> {
   let p: ReturnType<typeof plan>;
   try {
     // the preview shows what --yes sends: with the user's yes, their notes go too
-    p = plan(site.name, { ops, consent: true });
+    p = plan(site.name, { ops, consent: true, as: await uploadName(site.name) });
   } catch (e) {
     throw new Fail(oneLine((e as Error).message), `api-anything ops ${site.name}`);
   }

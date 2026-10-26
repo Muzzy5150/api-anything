@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Gate, gate } from "./checks.js";
 import { slugOf } from "./domain.js";
+import { sharedName } from "./registry.js";
 import type { Evidence, SiteContext, VersionUpload } from "./registry-api.js";
 import { hostsOf, summarize } from "./search.js";
 import { besideOrigins, credentialsOf, ipIn, opUrls, scanSecrets } from "./secrets.js";
@@ -111,6 +112,19 @@ export function registryName(site: Site, bundledDir = BUNDLED_DIR): string {
   return slugOf(new URL(site.baseUrl).hostname);
 }
 
+/**
+ * `registryName`, asking the registry when the site is held under neither its own name nor the slug: a site
+ * learned here under the name the registry serves for its domain (learn_site reuses it) goes up under it.
+ */
+export async function uploadName(name: string, o: { signal?: AbortSignal } = {}): Promise<string> {
+  const r = loadSite(name);
+  if (!r) return name;
+  const fallback = registryName(r.site);
+  if (fallback === r.site.name) return fallback;
+  const domain = siteOf(new URL(r.site.baseUrl).hostname);
+  return (await sharedName(domain, o)) === r.site.name ? r.site.name : fallback;
+}
+
 export interface OpPlan {
   op: string;
   upload: VersionUpload;
@@ -142,7 +156,7 @@ export interface Plan {
  */
 export function plan(
   name: string,
-  o: { ops?: string[]; evidence?: Partial<Evidence>; parent?: string; consent?: boolean } = {},
+  o: { ops?: string[]; evidence?: Partial<Evidence>; parent?: string; consent?: boolean; as?: string } = {},
 ): Plan {
   name = safeName(name);
   const r = loadSite(name);
@@ -157,7 +171,7 @@ export function plan(
   const live = credentialsOf(
     besideOrigins(loadSession(name), [ex.spec.baseUrl, ...ex.spec.operations.flatMap(opUrls)]),
   );
-  const as = registryName(r.site);
+  const as = o.as ?? registryName(r.site);
   const context: SiteContext = {
     name: as,
     domain: siteOf(new URL(ex.spec.baseUrl).hostname),

@@ -78,11 +78,14 @@ web server does, and does not store it.
    `api-anything check`, or notes the user wrote, go only with their yes (`publish --yes`). A pulled
    site's notes came from the registry and go back with its heal.
 5. A new site's name is its registrable domain with dots as dashes (`crates-io` for crates.io,
-   `lobste-rs` for lobste.rs). `learn_site` names a new site that way, unless this machine already has a
-   site on that host. A local site under another name (one the user gave, or one learned before) goes up
-   under that slug: `shareOps` uploads a site that is neither pulled nor bundled under its domain's slug,
-   and says so in the outcome's `as` (`publish.ts` `registryName`). A pulled or bundled site keeps its
-   name, which the registry already holds.
+   `lobste-rs` for lobste.rs); a site the registry already holds keeps its name (a seed's: goodreads.com
+   is `goodreads`), and a new op uploaded under another name on that domain goes to review. So
+   `learn_site` names a new site after a site this machine has on that host, else the name the registry
+   serves the domain under (`sharedName`: `GET /v1/search?q=<domain>`, a match whose `domain` is it;
+   not asked for a trigger on this machine or the network), else the slug. `shareOps` uploads a site
+   under its own name when it is pulled or bundled or the registry serves its domain under that name,
+   and otherwise under the slug, which the outcome's `as` names (`publish.ts` `registryName`,
+   `uploadName`).
 
 ## Verification by the crowd
 
