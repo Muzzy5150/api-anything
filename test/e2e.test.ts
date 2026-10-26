@@ -276,7 +276,7 @@ describe("e2e", { skip: !browserAvailable() && "no Chromium browser installed" }
     ]);
   });
 
-  test("10. the MCP server lists 3 meta-tools, calls reads, and hides and refuses writes", async () => {
+  test("10. the MCP server lists its 5 meta-tools, calls reads, and hides and refuses writes", async () => {
     const client = new Client({ name: "e2e", version: "0" });
     await client.connect(
       new StdioClientTransport({
@@ -290,6 +290,7 @@ describe("e2e", { skip: !browserAvailable() && "no Chromium browser installed" }
       const tools = await client.listTools();
       assert.deepEqual(tools.tools.map((t) => t.name).sort(), [
         "call_operation",
+        "find_sites",
         "list_operations",
         "list_sites",
         "login",
