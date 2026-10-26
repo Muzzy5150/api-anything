@@ -1211,7 +1211,11 @@ export async function healOperation(
   }
   const tried = scanned ? swapped.replace("%s", last!.reason) : "rescan found nothing new";
   if (o.browser === false)
-    return { outcome: "failed", attempt: last, reason: `${tried}; recapture needs the browser (maxTier 1)` };
+    return {
+      outcome: "failed",
+      attempt: last,
+      reason: `${tried}; recapture needs the browser, which this call does not run (maxTier 1, or an unconfirmed operation an agent pulled)`,
+    };
   // nothing was learned about the op: once a browser is installed, the next call heals
   if (!browserAvailable())
     return {
