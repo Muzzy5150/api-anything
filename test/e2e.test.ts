@@ -11,10 +11,11 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { Page } from "playwright-core";
 import { browserAvailable, closeBrowser, openBrowser, runTrigger } from "../src/browser.js";
 import { call, heal } from "../src/execute.js";
 import { addOperation, capturePage, profileDir } from "../src/heal.js";
-import { importSession } from "../src/login.js";
+import { importSession, windowLogin } from "../src/login.js";
 import { loadSession, saveSession } from "../src/session.js";
 import { rememberedTier, staleMark } from "../src/store.js";
 import { makeChromiumDb } from "./fixture/cookie-db.js";
@@ -475,6 +476,82 @@ describe("e2e", { skip: !browserAvailable() && "no Chromium browser installed" }
       delete process.env.API_ANYTHING_BROWSER_ROOTS;
       rmSync(browserRoot, { recursive: true, force: true });
     }
+  });
+
+  test("20. a window sign-in counts only when a login cookie appears while it is open", async () => {
+    const url = `${fx.url}/members`;
+    const site = "members";
+    // the session a failed window sign-in must leave as it was
+    saveSession(site, { cookies: [], values: {}, source: "chrome:Default" });
+    /**
+     * Open the window, let the user do `act` in it as soon as it shows the site, then close it as the
+     * user would. Closing Chrome's last window on Linux or Windows quits it, and a read of a quitting
+     * Chrome's jar misses its session cookies (app_session has no expiry; CI's Linux run lost it). Here
+     * that holds on every OS, for a read that starts once the page has closed and for one in flight
+     * across the close, made sure of by a response just before it: neither may count.
+     */
+    const inWindow = async (act: (page: Page) => Promise<unknown> = async () => {}) => {
+      const pending = windowLogin(site, url, { waitForEnter: false });
+      let page: Page | undefined;
+      let ctx: Awaited<ReturnType<typeof openBrowser>> | undefined;
+      for (let i = 0; i < 300 && !page; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        ctx = await openBrowser({ profileDir: profileDir(), headless: false });
+        page = ctx.pages().find((p) => p.url() === url);
+      }
+      assert.ok(page && ctx, "the window opened on the site");
+      const shown = page;
+      await act(shown);
+      // from here every read of the jar answers only once the page has closed, and then empty
+      let closed = false;
+      let reads = 0;
+      shown.once("close", () => {
+        closed = true;
+      });
+      ctx.cookies = () => {
+        reads++;
+        return new Promise((resolve) => (closed ? resolve([]) : shown.once("close", () => resolve([]))));
+      };
+      const before = reads;
+      await shown.evaluate(() => fetch("/members?late").then((r) => r.text()));
+      for (let i = 0; i < 100 && reads === before; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(reads > before, "a read of the jar is in flight as the window closes");
+      await shown.close({ runBeforeUnload: true }); // as a human closing it: the page may ask first
+      return pending;
+    };
+
+    const nothing = await inWindow();
+    assert.equal(nothing.ok, false);
+    assert.match(
+      !nothing.ok ? nothing.reason : "",
+      /no sign-in seen: .*app_session every visitor is given does not count.*the stored session is unchanged/,
+    );
+    assert.deepEqual(
+      loadSession(site),
+      { cookies: [], values: {}, source: "chrome:Default", updatedAt: loadSession(site).updatedAt },
+      "the previous session is kept as it was",
+    );
+
+    const signedIn = await inWindow((page) => page.goto(`${fx.url}/members/signin`));
+    assert.equal(signedIn.ok, true, JSON.stringify(signedIn));
+    assert.deepEqual(signedIn.ok && signedIn.renewed, ["auth_token"]);
+    assert.equal(loadSession(site).source, "window");
+    assert.deepEqual(loadSession(site).guestCookies, ["app_session"]);
+    assert.ok(loadSession(site).cookies.some((c) => c.name === "auth_token"));
+
+    // the profile already holds the login: opening and closing the window proves nothing about it
+    // and a page that asks before it is left still closes: the window's dialog answer lets it go
+    const again = await inWindow(async (page) => {
+      await page.click("body");
+      await page.evaluate(() =>
+        addEventListener("beforeunload", (e) => {
+          e.preventDefault();
+          e.returnValue = "";
+        }),
+      );
+    });
+    assert.equal(again.ok, false);
+    assert.match(!again.ok ? again.reason : "", /no new sign-in: the window already held auth_token when it opened/);
   });
 
   test("19. a picker with its own range: a failure status in a 200 body is not drift, and a heal keeps the place the page left out", async () => {

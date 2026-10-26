@@ -1318,7 +1318,8 @@ export async function pageFetch(o: {
 
 /**
  * Open `url` headed so the user can sign in. Resolves when they close the window or press Enter
- * in the terminal; what counts as logged in is the caller's call. Returns the site's cookies.
+ * in the terminal; what counts as logged in is the caller's call. Returns the site's cookies as the
+ * window opened, before the page loaded, and as it closed.
  */
 export async function login({
   url,
@@ -1328,7 +1329,7 @@ export async function login({
   url: string;
   profileDir: string;
   waitForEnter?: boolean;
-}): Promise<StoredCookie[]> {
+}): Promise<{ opened: StoredCookie[]; closed: StoredCookie[] }> {
   const release = hold();
   try {
     return await loginWindow(url, profileDir, waitForEnter);
@@ -1337,40 +1338,89 @@ export async function login({
   }
 }
 
-async function loginWindow(url: string, profileDir: string, waitForEnter: boolean): Promise<StoredCookie[]> {
+// It does not close itself once a login cookie appears: a site can set its session cookie before a
+// second factor, a consent page or a redirect back from the identity provider is done, and closing
+// then would keep a half-finished sign-in.
+async function loginWindow(
+  url: string,
+  profileDir: string,
+  waitForEnter: boolean,
+): Promise<{ opened: StoredCookie[]; closed: StoredCookie[] }> {
   const ctx = await openBrowser({ profileDir, headless: false });
+  const opened = siteCookies(await ctx.cookies(), url);
   const page = ctx.pages()[0] ?? (await ctx.newPage());
-  await page.goto(url);
-  // Closing the last window closes the context, after which cookies can't be read, so keep a snapshot.
-  let snapshot = await ctx.cookies();
-  const poll = setInterval(
-    () =>
-      ctx.cookies().then(
-        (c) => (snapshot = c),
-        () => {},
-      ),
-    1000,
-  );
+  // Playwright answers the window's dialogs, not the human: leaving or closing a page is never refused
+  // (a dismissed beforeunload would keep it open), an alert is only read, a confirm or prompt declined.
+  const onDialog = (d: Dialog) => answer(d, d.type() === "beforeunload" || d.type() === "alert");
+  const onPage = (p: Page) => p.on("dialog", onDialog);
+  onPage(page);
+  ctx.on("page", onPage); // a sign-in popup (an identity provider) too
+  // The cookies are read while the window is open, never after it closed: closing Chrome's last window
+  // on Linux or Windows quits it, and a quitting Chrome's jar has lost its session cookies (a login
+  // cookie among them, on many sites). So the jar is read on every response, where a Set-Cookie lands,
+  // and every half second for one a script sets. A read counts only if it completed while the window
+  // was open (one in flight when it closed may answer from the quitting jar), and of those the newest
+  // started is kept.
+  let snapshot: Cookie[] = [];
+  let started = 0;
+  let kept = 0;
+  /** no more reads start */
+  let shut = false;
+  /** the window began closing: no read that completes from here counts */
+  let closing = false;
+  const reads = new Set<Promise<void>>();
+  const read = () => {
+    if (shut) return;
+    const n = ++started;
+    const r = ctx.cookies().then(
+      (c) => {
+        if (!closing && n > kept) [kept, snapshot] = [n, c];
+      },
+      () => {},
+    );
+    reads.add(r);
+    void r.finally(() => reads.delete(r));
+  };
+  ctx.on("response", read);
+  const poll = setInterval(read, 500);
   let onEnter = () => {};
+  let entered = false;
+  const done = new Promise<void>((resolve) => {
+    onEnter = () => {
+      entered = true;
+      resolve();
+    };
+    const close = () => {
+      closing = true;
+      shut = true;
+      resolve();
+    };
+    ctx.once("close", close);
+    page.once("close", close);
+    // The MCP server's stdin is its transport; only the CLI reads Enter.
+    if (waitForEnter) {
+      process.stdin.once("data", onEnter);
+      process.stdin.resume();
+    }
+  });
   try {
-    await new Promise<void>((resolve) => {
-      onEnter = resolve;
-      ctx.once("close", () => resolve());
-      page.once("close", () => resolve());
-      // The MCP server's stdin is its transport; only the CLI reads Enter.
-      if (waitForEnter) {
-        process.stdin.once("data", onEnter);
-        process.stdin.resume();
-      }
-    });
-    snapshot = await ctx.cookies().catch(() => snapshot);
+    // A user who clicks away before the page has loaded interrupts this navigation; the window stays theirs.
+    await page.goto(url).catch(() => {});
+    read();
+    await done;
+    // Enter leaves the window open, so one more read is current (unless the user closes it meanwhile).
+    if (entered && !shut) read();
+    shut = true;
+    await Promise.all(reads);
   } finally {
     clearInterval(poll);
+    ctx.off("response", read);
+    ctx.off("page", onPage);
     if (waitForEnter) {
       process.stdin.off("data", onEnter);
       process.stdin.pause();
     }
     await closeBrowser();
   }
-  return siteCookies(snapshot, url);
+  return { opened, closed: siteCookies(snapshot, url) };
 }
