@@ -205,13 +205,13 @@ export const CSP = `default-src 'none'; style-src 'unsafe-inline'; img-src data:
 
 const ICON = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#2952e3"/><path d="M9 22l7-12 7 12" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>')}`;
 
-function layout(o: { title: string; description: string; url: string; body: string }) {
+function layout(o: { title: string; description: string; url: string; body: string; noindex?: boolean }) {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(o.title)}</title>
+${o.noindex ? '<meta name="robots" content="noindex">\n' : ""}<title>${esc(o.title)}</title>
 <meta name="description" content="${esc(o.description)}">
 <link rel="canonical" href="${esc(o.url)}">
 <meta property="og:type" content="website">
@@ -312,6 +312,8 @@ ${s.notes ? `<h2>Notes</h2>\n<div class="notes">${markdown(s.notes)}</div>` : ""
     description,
     url: `${origin}/sites/${encodeURIComponent(s.name)}`,
     body,
+    // a site nobody else confirmed may say it is any brand: no search engine should list it
+    noindex: !s.operations.some((o) => o.status === "live"),
   });
 }
 

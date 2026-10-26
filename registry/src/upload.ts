@@ -3,7 +3,7 @@ import { z } from "zod";
 import { siteOf } from "../../src/domain.js";
 import { type Evidence, type SiteContext, versionHashText } from "../../src/registry-api.js";
 import { type Operation, OperationSchema, SiteSchema } from "../../src/spec.js";
-import { vetShared } from "../../src/vet.js";
+import { vetShared, writesGraphql } from "../../src/vet.js";
 import { sha256Hex } from "./auth.js";
 
 export const HASH = z.string().regex(/^[0-9a-f]{64}$/);
@@ -95,13 +95,66 @@ function offSite(op: Operation, domain: string): string[] {
   return [...new Set(hosts.filter((h) => siteOf(h) !== domain))];
 }
 
+/** Why a new site may not take this name: it must start with its domain's first label (amazon for amazon.com). */
+export function nameRefusal(name: string, domain: string): string | undefined {
+  const label = domain.split(".")[0] ?? domain;
+  if (name.startsWith(label)) return undefined;
+  return `a new site's name starts with the first label of its domain ${domain}: ${label}, or ${label}-something; not ${name}`;
+}
+
+/** The GraphQL documents a JSON or GraphQL body carries at `query`. */
+function documents(op: Operation): string[] {
+  const body = op.request.body ?? "";
+  if (/graphql/i.test(op.request.headers["content-type"] ?? "")) return [body];
+  try {
+    const j: unknown = JSON.parse(body);
+    return (Array.isArray(j) ? j : [j]).flatMap((item) => {
+      const q = (item as { query?: unknown } | null)?.query;
+      return typeof q === "string" ? [q] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A POST that carries GraphQL query documents and nothing else. Stricter than vetShared: a persisted query
+ * (a hash, no document) could name a mutation, so it goes to review.
+ */
+function graphqlQuery(op: Operation): boolean {
+  const docs = documents(op);
+  const reads = (d: string) => /^\s*(query|fragment)\b|^\s*\{/.test(d.replace(/#[^\n\r]*/g, ""));
+  return docs.length > 0 && docs.every((d) => reads(d) && !writesGraphql(d));
+}
+
+/** What the registry already holds of the upload's site. */
+export interface SiteHeld {
+  /** op names any version of the site has */
+  opNames: string[];
+  /** the site lists login cookies or has an op learned while signed in */
+  login: boolean;
+}
+
 /** Why a version is outside the automatic rules: served to its uploader only until a maintainer decides. */
-export function reviewReasons(site: SiteContext, op: Operation, evidence: Evidence): string[] {
+export function reviewReasons(
+  site: SiteContext,
+  op: Operation,
+  evidence: Evidence,
+  held: SiteHeld = { opNames: [], login: false },
+): string[] {
   const reasons: string[] = [];
   const off = offSite(op, site.domain);
   if (off.length) reasons.push(`sends to or opens ${off.join(", ")}, off its site ${site.domain}`);
   if (op.learnedLoggedIn || evidence.learnedLoggedIn) reasons.push("learned while signed in");
   if (!op.readOnly) reasons.push("a write");
+  // a "read" that changes something, run by every caller's client with their cookies, is a write by proxy
+  const method = op.request.method.toUpperCase();
+  if (op.readOnly && method !== "GET" && method !== "HEAD" && !(method === "POST" && graphqlQuery(op)))
+    reasons.push(`a read sent as ${method}${method === "POST" ? ", not a GraphQL query" : ""}`);
+  const refs = [...new Set(op.slots.flatMap((s) => (s.ref ? [s.ref] : [])))];
+  if (refs.length) reasons.push(`sends the caller's own ${refs.join(", ")}`);
+  if ((held.login || site.loginCookies?.length) && !held.opNames.includes(op.name))
+    reasons.push(`a new op on a site with a login: ${op.name}`);
   if (op.public?.length) reasons.push(`lists public values: ${op.public.join(", ")}`);
   // blocked: a bot wall answered the cookie-free replay, so the data is public behind it
   if (evidence.cleanReplay !== "ok" && evidence.cleanReplay !== "blocked")

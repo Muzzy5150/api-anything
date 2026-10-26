@@ -4,7 +4,8 @@
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "observability": { "enabled": true },
+  // off: request logs would keep URLs, and a search URL holds what someone looked for
+  "observability": { "enabled": false, "logs": { "enabled": false } },
   "d1_databases": [
     {
       "binding": "DB",
@@ -13,7 +14,7 @@
       "migrations_dir": "migrations"
     }
   ],
-  // archive what nobody called successfully in 30 days
+  // archive what nobody called successfully in 30 days; delete what was archived 30 days ago
   "triggers": { "crons": ["17 3 * * *"] }
   // secrets: ADMIN_TOKEN, SALT (wrangler secret put). Thresholds (rules.ts) can be set as vars.
 }

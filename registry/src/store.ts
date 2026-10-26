@@ -242,20 +242,53 @@ export async function servable(db: D1Database, since: string, viewer?: string, s
   ).results;
 }
 
-/** Candidates this key neither uploaded nor reported, oldest first. */
+/**
+ * Candidates this key neither uploaded nor reported, oldest first: only those served (no live version of
+ * the op shadows them), that plain HTTP can call (minTier 1), on a site that already has a live op, so a
+ * stranger's fresh site cannot point every verifying install at a host it watches.
+ */
 export async function unverified(db: D1Database, key: string, limit: number) {
   return (
     await db
       .prepare(
         `SELECT v.hash, v.site, v.op_name, v.operation FROM versions v
         WHERE v.status = 'candidate' AND v.uploader <> ?
+          AND COALESCE(json_extract(v.operation, '$.minTier'), 1) = 1
           AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.hash = v.hash AND r.key = ?)
+          AND NOT EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.op_name = v.op_name AND l.status = 'live')
+          AND EXISTS (SELECT 1 FROM versions l WHERE l.site = v.site AND l.status = 'live')
         ORDER BY v.created_at LIMIT ?`,
       )
       .bind(key, key, limit)
       .all<Pick<VersionRow, "hash" | "site" | "op_name" | "operation">>()
   ).results;
 }
+
+/** The op names a site's versions have, and whether any of them was learned signed in. */
+export async function siteOps(db: D1Database, site: string): Promise<{ opNames: string[]; loginOp: boolean }> {
+  const rows = (
+    await db
+      .prepare(
+        "SELECT op_name, MAX(COALESCE(json_extract(operation, '$.learnedLoggedIn'), 0)) AS login FROM versions WHERE site = ? GROUP BY op_name",
+      )
+      .bind(site)
+      .all<{ op_name: string; login: number }>()
+  ).results;
+  return { opNames: rows.map((r) => r.op_name), loginOp: rows.some((r) => r.login === 1) };
+}
+
+/** Whether `key`'s latest report on `hash` is a fail made since `since`. */
+export const failedOn = async (db: D1Database, hash: string, key: string, since: string) =>
+  !!(await db
+    .prepare("SELECT 1 AS x FROM reports WHERE hash = ? AND key = ? AND outcome = 'fail' AND at >= ?")
+    .bind(hash, key, since)
+    .first());
+
+export const getKey = (db: D1Database, key: string) =>
+  db
+    .prepare("SELECT first_seen, uploads FROM keys WHERE key = ?")
+    .bind(key)
+    .first<{ first_seen: string; uploads: number }>();
 
 /** Adds `n` to a subject's count for this hour and answers the new count. */
 export async function count(db: D1Database, subject: string, kind: string, hour: number, n: number): Promise<number> {
@@ -296,11 +329,20 @@ export async function archiveCandidates(db: D1Database): Promise<(Archivable & {
   }));
 }
 
-/** Archives the given versions and drops spent rate counters. */
-export const archive = (db: D1Database, hashes: string[], now: string, hour: number) =>
+/**
+ * Archives the given versions, deletes versions archived before `purgeBefore` with their reports, and drops
+ * spent rate counters.
+ */
+export const archive = (db: D1Database, hashes: string[], now: string, hour: number, purgeBefore: string) =>
   db.batch([
     ...hashes.map((h) =>
       db.prepare("UPDATE versions SET status = 'archived', updated_at = ? WHERE hash = ?").bind(now, h),
     ),
+    db
+      .prepare(
+        "DELETE FROM reports WHERE hash IN (SELECT hash FROM versions WHERE status = 'archived' AND updated_at < ?)",
+      )
+      .bind(purgeBefore),
+    db.prepare("DELETE FROM versions WHERE status = 'archived' AND updated_at < ?").bind(purgeBefore),
     db.prepare("DELETE FROM rates WHERE hour < ?").bind(hour - 24),
   ]);

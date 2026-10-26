@@ -19,6 +19,10 @@ export interface Thresholds {
   recentDays: number;
   uploadsPerHour: number;
   reportsPerHour: number;
+  /** uploads a key first seen less than an hour ago may make */
+  newKeyUploads: number;
+  /** uploads an hour across every key: the circuit breaker */
+  uploadsPerHourAll: number;
 }
 
 /** Each threshold from the env var of its name (a Worker var is a string), else its default. */
@@ -37,6 +41,8 @@ export function thresholds(env: object): Thresholds {
     recentDays: n("RECENT_DAYS", 30),
     uploadsPerHour: n("UPLOADS_PER_HOUR", 30),
     reportsPerHour: n("REPORTS_PER_HOUR", 2000),
+    newKeyUploads: n("NEW_KEY_UPLOADS", 5),
+    uploadsPerHourAll: n("UPLOADS_PER_HOUR_ALL", 300),
   };
 }
 
@@ -59,7 +65,8 @@ export const ABOUT_OP: readonly Outcome[] = ["ok", "fail", "wrong"];
 
 export function promoted(f: Facts, t: Thresholds): boolean {
   const keys = f.heal ? t.promoteHealKeys : t.promoteKeys;
-  const networks = Math.min(t.promoteNetworks, keys);
+  // a heal replaces what callers already rely on, so it never needs fewer networks than a new op
+  const networks = f.heal ? t.promoteNetworks : Math.min(t.promoteNetworks, keys);
   // each `wrong` outweighs two oks
   return f.okKeys - 2 * f.wrongKeys >= keys && f.okNetworks >= networks;
 }
@@ -112,9 +119,9 @@ export interface Archivable {
 }
 
 /**
- * The versions the daily job archives: a candidate or a degraded version with no ok since `cutoff`, and any
- * version older than a live version of the same op, which replaced it. A live version never times out: it
- * leaves live only by degrading.
+ * The versions the daily job archives: a candidate or a degraded version with no ok since `cutoff`, and a
+ * degraded version older than a live version of the same op, which replaced it. Never a live version: a
+ * newer live one may be a takeover, so the old one leaves live only by degrading.
  */
 export function toArchive<V extends Archivable>(versions: V[], cutoff: string): V[] {
   const newestLive = new Map<string, string>();
@@ -123,9 +130,10 @@ export function toArchive<V extends Archivable>(versions: V[], cutoff: string): 
     if (v.status === "live" && v.createdAt > (newestLive.get(op) ?? "")) newestLive.set(op, v.createdAt);
   }
   return versions.filter((v) => {
-    const replaced = v.createdAt < (newestLive.get(`${v.site}\n${v.op}`) ?? "");
-    const stale = (v.status === "candidate" || v.status === "degraded") && (v.lastOkAt ?? v.createdAt) < cutoff;
-    return SERVED.includes(v.status) && (replaced || stale);
+    if (v.status !== "candidate" && v.status !== "degraded") return false;
+    const replaced = v.status === "degraded" && v.createdAt < (newestLive.get(`${v.site}\n${v.op}`) ?? "");
+    const stale = (v.lastOkAt ?? v.createdAt) < cutoff;
+    return replaced || stale;
   });
 }
 

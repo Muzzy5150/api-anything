@@ -124,7 +124,7 @@ export const op = (over: Record<string, any> = {}) => ({
 });
 
 export const site = {
-  name: "books",
+  name: "example-books",
   domain: "example.com",
   baseUrl: "https://www.example.com",
   displayName: "Books",

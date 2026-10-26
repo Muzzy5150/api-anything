@@ -13,7 +13,7 @@ export const REGISTRY_API = "https://api-anything-registry.forth-site.workers.de
  * - live: confirmed by other installs; the default answer
  * - degraded: failing across installs; served only when nothing better exists
  * - review: outside the automatic rules (a login, a write, another site's host); served only to its uploader
- * - archived: a candidate or degraded version with no ok report in 30 days, or one a newer live version replaced; never served
+ * - archived: a candidate or degraded version with no ok report in 30 days, or a degraded one a newer live version replaced; never served (a live version is never archived)
  * - blocked: a maintainer's kill switch; never served
  */
 export type Status = "candidate" | "live" | "degraded" | "review" | "archived" | "blocked";

@@ -1,6 +1,6 @@
 /** What the registry serves: each site with the best version of each of its ops, and search over them. */
 import type { FoundOp, SearchMatch, ServedOp, ServedSite } from "../../src/registry-api.js";
-import { type IndexEntry, indexEntry, score, summarize } from "../../src/search.js";
+import { domainOf, type IndexEntry, indexEntry, score, summarize } from "../../src/search.js";
 import type { Operation, Site } from "../../src/spec.js";
 import { byRank, successRate } from "./rules.js";
 import { allSites, context, type D1Database, getSite, type StatRow, servable } from "./store.js";
@@ -75,13 +75,22 @@ const foundOp = (o: ServedOp): FoundOp => ({
   })),
 });
 
-/** The sites that answer a query, best first, cut as the client's search cuts (src/registry.ts `search`). */
+/** A site some other install confirmed: it has a live op. Only these are listed and found by words. */
+export const confirmed = (s: ServedSite) => s.operations.some((o) => o.status === "live");
+
+/**
+ * The sites that answer a query, best first, cut as the client's search cuts (src/registry.ts `search`).
+ * Anyone can upload a site that says it is Amazon, so a site with no live op is found only by a domain or
+ * URL query naming its own domain, and a confirmed site always ranks above it.
+ */
 export function search(sites: ServedSite[], query: string, limit: number): SearchMatch[] {
+  const byDomain = domainOf(query) !== undefined;
   const scored = sites
-    .map((s) => ({ s, score: score(entryOf(s), query) }))
-    .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
+    .filter((s) => byDomain || confirmed(s))
+    .map((s) => ({ s, live: confirmed(s), score: score(entryOf(s), query) }))
+    .sort((a, b) => Number(b.live) - Number(a.live) || b.score - a.score || a.s.name.localeCompare(b.s.name));
   // a site far behind the best answer matched a stray word
-  const best = scored[0]?.score ?? 0;
+  const best = Math.max(0, ...scored.map((x) => x.score));
   return scored
     .filter(({ score }) => score > 0 && score * 3 >= best)
     .slice(0, limit)

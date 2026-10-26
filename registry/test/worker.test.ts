@@ -16,7 +16,7 @@ describe("signatures", () => {
     const r = await send(env, "POST", "/v1/versions", { as: install(), body: upload() });
     assert.equal(r.status, 201, r.text);
     const expected = createHash("sha256")
-      .update(versionHashText("books", OperationSchema.parse(op())))
+      .update(versionHashText("example-books", OperationSchema.parse(op())))
       .digest("hex");
     assert.deepEqual(r.body, { hash: expected, status: "candidate", duplicate: false });
   });
@@ -55,6 +55,15 @@ describe("signatures", () => {
     const r = await send(env, "GET", "/v1/verify-jobs?limit=3", { as: install() });
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.body, { jobs: [] });
+  });
+
+  test("a signature over the bare path does not cover a query", async () => {
+    const { env } = registry();
+    const r = await send(env, "GET", "/v1/verify-jobs?limit=3", {
+      headers: signed(install(), "GET", "/v1/verify-jobs", ""),
+    });
+    assert.equal(r.status, 401);
+    assert.match(r.body.error, /does not match/);
   });
 });
 
@@ -105,8 +114,59 @@ describe("uploads", () => {
     const big = await post({ ...upload(), padding: "x".repeat(257 * 1024) });
     assert.equal(big.status, 413);
 
-    const notJson = await send(env, "POST", "/v1/versions", { as, body: "{nope" });
+    // a fresh key: `as` has spent its first hour's uploads
+    const notJson = await send(env, "POST", "/v1/versions", { as: install(), body: "{nope" });
     assert.equal(notJson.status, 400);
+  });
+
+  test("a body is cut off at the cap while streaming, whatever content-length says", async () => {
+    const { env } = registry();
+    const big = JSON.stringify({ ...upload(), padding: "x".repeat(300 * 1024) });
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(big));
+        c.close();
+      },
+    });
+    const request = new Request("https://registry.test/v1/versions", {
+      method: "POST",
+      headers: { "cf-connecting-ip": NET1, ...signed(install(), "POST", "/v1/versions", big) },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    assert.equal(request.headers.get("content-length"), null);
+    const r = await worker.fetch(request, env);
+    assert.equal(r.status, 413);
+  });
+
+  test("an unsigned or stale upload is refused before its body is read", async () => {
+    const { env } = registry();
+    let pulled = false;
+    // no queue to fill, so pull runs only when someone reads
+    const body = () =>
+      new ReadableStream(
+        {
+          pull(c) {
+            pulled = true;
+            c.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    const post = (headers: Record<string, string>) =>
+      worker.fetch(
+        new Request("https://registry.test/v1/versions", {
+          method: "POST",
+          headers,
+          body: body(),
+          duplex: "half",
+        } as RequestInit),
+        env,
+      );
+    assert.equal((await post({})).status, 401);
+    const stale = signed(install(), "POST", "/v1/versions", "", Date.now() - 10 * 60_000);
+    assert.equal((await post(stale)).status, 401);
+    assert.equal(pulled, false);
   });
 
   test("the first upload binds a site name to its domain", async () => {
@@ -225,7 +285,7 @@ describe("verification by the crowd", () => {
     const { env } = registry();
     const uploader = install();
     const { hash } = (await send(env, "POST", "/v1/versions", { as: uploader, body: upload() })).body;
-    const status = async () => (await send(env, "GET", "/v1/sites/books")).body.operations[0];
+    const status = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
 
     await report(env, uploader, hash, "ok", NET2);
     await report(env, install(), hash, "ok", NET1);
@@ -251,7 +311,7 @@ describe("verification by the crowd", () => {
       body: { reports: [{ hash, outcome: "ok" }] },
     });
     await send(env, "POST", "/v1/reports", { as: install(), ip: NET2, asn: 7922, body: [{ hash, outcome: "ok" }] });
-    assert.equal((await send(env, "GET", "/v1/sites/books")).body.operations[0].status, "candidate");
+    assert.equal((await send(env, "GET", "/v1/sites/example-books")).body.operations[0].status, "candidate");
   });
 
   test("an install counts once, by its latest outcome", async () => {
@@ -260,24 +320,62 @@ describe("verification by the crowd", () => {
     const k = install();
     for (let i = 0; i < 3; i++) await report(env, k, hash, "ok", NET1);
     await report(env, k, hash, "fail", NET1);
-    const served = (await send(env, "GET", "/v1/sites/books")).body.operations[0];
+    const served = (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
     assert.equal(served.confirmations, 0);
     assert.equal(served.successRate, 0);
   });
 
-  test("a heal of a live version is promoted by one confirmation", async () => {
-    const { env } = registry();
+  test("a heal: fewer installs only for a version failing for its uploader or degraded, never fewer networks", async () => {
+    // three installs promote a new version; a heal takes PROMOTE_HEAL_KEYS (1), but still 2 networks
+    const { env, raw } = registry({ PROMOTE_KEYS: "3" });
     const live = (await seed(env, { site, operations: [op()] })).body.operations[0];
-    const heal = op({ request: { method: "GET", url: "https://www.example.com/api/search?q=dune&v=2", headers: {} } });
+    const variant = (v: number) =>
+      op({ request: { method: "GET", url: `https://www.example.com/api/search?q=dune&v=${v}`, headers: {} } });
+    const row = (hash: string) =>
+      raw.prepare("SELECT status, heal FROM versions WHERE hash = ?").get(hash) as { status: string; heal: number };
+    const healOf = (as: ReturnType<typeof install>, v: number, from = live.hash) =>
+      send(env, "POST", "/v1/versions", {
+        as,
+        body: upload({ operation: variant(v), parent: from, evidence: { ...evidence, healedFrom: from } }),
+      });
+
+    // the takeover: a claim on a live version that never failed for this key is no heal
+    const claim = (await healOf(install(), 2)).body.hash;
+    assert.equal(row(claim).heal, 0);
+    await report(env, install(), claim, "ok", NET1);
+    await report(env, install(), claim, "ok", NET2);
+    assert.equal(row(claim).status, "candidate", "two installs do not promote a new version here");
+
+    // a real heal: its uploader's own calls of the live version failed this week
+    const fixer = install();
+    await report(env, fixer, live.hash, "fail", NET1);
+    const fix = (await healOf(fixer, 3)).body.hash;
+    assert.equal(row(fix).heal, 1);
+    await report(env, install(), fix, "ok", NET1);
+    await report(env, install(), fix, "ok", NET1);
+    assert.equal(row(fix).status, "candidate", "one network is never enough, heal or not");
+    await report(env, install(), fix, "ok", NET2);
+    assert.equal(row(fix).status, "live");
+
+    // a failure older than a week does not count
+    const late = install();
+    await report(env, late, live.hash, "fail", NET2);
+    raw
+      .prepare("UPDATE reports SET at = ? WHERE key = ?")
+      .run(new Date(Date.now() - 8 * 86_400_000).toISOString(), late.key);
+    assert.equal(row((await healOf(late, 4)).body.hash).heal, 0);
+
+    // a degraded version needs no failure of the uploader's own
+    raw.prepare("UPDATE versions SET status = 'degraded' WHERE hash = ?").run(live.hash);
+    assert.equal(row((await healOf(install(), 5)).body.hash).heal, 1);
+
+    // nor is a version of another op name healed
+    const other = op({ name: "bookPage", match: { host: "www.example.com", path: "/api/book" } });
     const up = await send(env, "POST", "/v1/versions", {
       as: install(),
-      body: upload({ operation: heal, parent: live.hash, evidence: { ...evidence, healedFrom: live.hash } }),
+      body: upload({ operation: other, evidence: { ...evidence, healedFrom: live.hash } }),
     });
-    assert.equal(up.body.status, "candidate");
-    await report(env, install(), up.body.hash, "ok", NET1);
-    const versions = await send(env, "GET", "/v1/sites/books");
-    assert.equal(versions.body.operations.length, 1, "one op, two versions");
-    assert.equal(versions.body.operations[0].status, "live");
+    assert.equal(row(up.body.hash).heal, 0);
   });
 
   test("a wrong report outweighs two oks", async () => {
@@ -286,7 +384,7 @@ describe("verification by the crowd", () => {
     await report(env, install(), hash, "wrong", NET1);
     await report(env, install(), hash, "ok", NET1);
     await report(env, install(), hash, "ok", NET2);
-    const status = async () => (await send(env, "GET", "/v1/sites/books")).body.operations[0];
+    const status = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
     assert.equal((await status()).status, "candidate");
     await report(env, install(), hash, "ok", "203.0.113.200");
     assert.equal((await status()).status, "candidate");
@@ -299,7 +397,7 @@ describe("verification by the crowd", () => {
     const { env } = registry();
     const { hash } = (await seed(env, { site, operations: [op()] })).body.operations[0];
     for (const outcome of ["auth", "rate", "blocked", "input", "input"]) await report(env, install(), hash, outcome);
-    const served = (await send(env, "GET", "/v1/sites/books")).body.operations[0];
+    const served = (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
     assert.equal(served.status, "live");
     assert.equal(served.successRate, undefined);
   });
@@ -311,7 +409,7 @@ describe("maintenance by the crowd", () => {
     const live = (await seed(env, { site, operations: [op()] })).body.operations[0];
     const next = op({ request: { method: "GET", url: "https://www.example.com/api/search?q=dune&v=2", headers: {} } });
     const cand = (await send(env, "POST", "/v1/versions", { as: install(), body: upload({ operation: next }) })).body;
-    const served = async () => (await send(env, "GET", "/v1/sites/books")).body.operations[0];
+    const served = async () => (await send(env, "GET", "/v1/sites/example-books")).body.operations[0];
     assert.equal((await served()).hash, live.hash);
 
     await report(env, install(), live.hash, "ok");
@@ -336,14 +434,14 @@ describe("maintenance by the crowd", () => {
       body: upload({ operation: op({ learnedLoggedIn: true }) }),
     });
     assert.equal(r.body.status, "review");
-    assert.equal((await send(env, "GET", "/v1/sites/books")).status, 404);
-    assert.equal((await send(env, "GET", "/v1/sites/books", { as: install() })).status, 404);
-    const own = await send(env, "GET", "/v1/sites/books", { as: uploader });
+    assert.equal((await send(env, "GET", "/v1/sites/example-books")).status, 404);
+    assert.equal((await send(env, "GET", "/v1/sites/example-books", { as: install() })).status, 404);
+    const own = await send(env, "GET", "/v1/sites/example-books", { as: uploader });
     assert.equal(own.status, 200);
     assert.equal(own.body.operations[0].status, "review");
     const found = await send(env, "GET", "/v1/search?q=books");
     assert.deepEqual(found.body.matches, []);
-    assert.doesNotMatch((await send(env, "GET", "/")).text, /href="\/sites\/books"/);
+    assert.doesNotMatch((await send(env, "GET", "/")).text, /href="\/sites\/example-books"/);
   });
 
   test("verify-jobs: candidates this key neither uploaded nor reported, with example args", async () => {
@@ -369,13 +467,35 @@ describe("maintenance by the crowd", () => {
     await post(other, mk("review"), { ...evidence, cleanReplay: "skipped" });
     await post(other, mk("noExample", { params: [{ name: "q", required: true }] }));
     await seed(env, { site, operations: [mk("seeded")] });
+    // shadowed by the live version of its op, so never served: nothing to check
+    await post(install(), mk("seeded", { description: "Find books, a shadow" }));
+    // needs a browser: background checks are plain HTTP
+    await post(install(), mk("browser", { minTier: 2 }));
+    // a site with no live op: a stranger's fresh site would send every install to a host it watches
+    const stranger = {
+      name: "example",
+      domain: "example.net",
+      baseUrl: "https://www.example.net",
+    };
+    const theirs = op({
+      request: { method: "GET", url: "https://track.example.net/p?q=dune", headers: {} },
+      trigger: { url: "https://track.example.net/s?q={q}" },
+      match: { host: "track.example.net", path: "/p" },
+    });
+    const fresh = await send(env, "POST", "/v1/versions", {
+      as: install(),
+      body: upload({ site: stranger, operation: theirs }),
+    });
+    assert.equal(fresh.body.status, "candidate", fresh.text);
 
     const r = await send(env, "GET", "/v1/verify-jobs?limit=20", { as: me });
-    assert.deepEqual(r.body.jobs, [{ hash: wanted, site: "books", op: "wanted", args: { q: "dune", page: 1 } }]);
+    assert.deepEqual(r.body.jobs, [
+      { hash: wanted, site: "example-books", op: "wanted", args: { q: "dune", page: 1 } },
+    ]);
     assert.equal((await send(env, "GET", "/v1/verify-jobs")).status, 401);
   });
 
-  test("the daily job archives stale candidates and degraded versions, and what a newer live version replaced", async () => {
+  test("the daily job archives stale candidates and degraded versions, and a degraded one a newer live one replaced; never a live one", async () => {
     const { env, raw } = registry();
     const OLD = "2026-01-01T00:00:00.000Z";
     const age = (hash: string, status?: string) =>
@@ -393,7 +513,7 @@ describe("maintenance by the crowd", () => {
     for (const v of live) age(v.hash);
     age(staleCandidate);
     age(staleDegraded, "degraded");
-    // a heal of searchBooks goes live: the seed's version of it is replaced
+    // a newer version of searchBooks goes live: it may be a takeover, so the seed's stays live
     const heal = await post(
       op({ request: { method: "GET", url: "https://www.example.com/api/search?q=dune&v=2", headers: {} } }),
     );
@@ -405,16 +525,46 @@ describe("maintenance by the crowd", () => {
     await worker.scheduled({ scheduledTime: Date.now() }, env);
     const status = (hash: string) =>
       (raw.prepare("SELECT status FROM versions WHERE hash = ?").get(hash) as { status: string }).status;
-    assert.equal(status(live[0].hash), "archived", "replaced by a newer live version");
+    assert.equal(status(live[0].hash), "live", "a live version is never archived, even with a newer live one");
     assert.equal(status(heal), "live");
     assert.equal(status(live[1].hash), "live", "a live version never times out");
     assert.equal(status(staleCandidate), "archived");
     assert.equal(status(staleDegraded), "archived");
     assert.equal(status(freshCandidate), "candidate");
 
+    // once the old one degrades, the newer live version has replaced it
+    raw
+      .prepare("UPDATE versions SET status = 'degraded', last_ok_at = ? WHERE hash = ?")
+      .run(new Date().toISOString(), live[0].hash);
+    await worker.scheduled({ scheduledTime: Date.now() }, env);
+    assert.equal(status(live[0].hash), "archived");
+
     await worker.scheduled({ scheduledTime: Date.now() + 31 * 86_400_000 }, env);
     assert.equal(status(freshCandidate), "archived");
     assert.equal(status(live[1].hash), "live");
+  });
+
+  test("the daily job deletes versions archived over 30 days ago, with their reports", async () => {
+    const { env, raw } = registry();
+    const named = (name: string) => op({ name, match: { host: "www.example.com", path: `/api/${name}` } });
+    const [old, recent] = (await seed(env, { site, operations: [named("old"), named("recent")] })).body.operations;
+    await report(env, install(), old.hash, "ok");
+    await report(env, install(), recent.hash, "ok");
+    const archived = (hash: string, days: number) =>
+      raw
+        .prepare("UPDATE versions SET status = 'archived', updated_at = ? WHERE hash = ?")
+        .run(new Date(Date.now() - days * 86_400_000).toISOString(), hash);
+    archived(old.hash, 31);
+    archived(recent.hash, 29);
+    await worker.scheduled({ scheduledTime: Date.now() }, env);
+    const versions = (hash: string) =>
+      (raw.prepare("SELECT COUNT(*) AS n FROM versions WHERE hash = ?").get(hash) as { n: number }).n;
+    const reports = (hash: string) =>
+      (raw.prepare("SELECT COUNT(*) AS n FROM reports WHERE hash = ?").get(hash) as { n: number }).n;
+    assert.equal(versions(old.hash), 0);
+    assert.equal(reports(old.hash), 0);
+    assert.equal(versions(recent.hash), 1);
+    assert.equal(reports(recent.hash), 1);
   });
 });
 
@@ -474,7 +624,7 @@ describe("admin", () => {
       headers: { authorization: `Bearer ${ADMIN}` },
     });
     assert.deepEqual(ok.body, { hash, status: "blocked" });
-    assert.equal((await send(env, "GET", "/v1/sites/books")).status, 404);
+    assert.equal((await send(env, "GET", "/v1/sites/example-books")).status, 404);
     const unknown = await send(env, "POST", `/v1/admin/versions/${"b".repeat(64)}`, {
       body: { status: "live" },
       headers: { authorization: `Bearer ${ADMIN}` },
@@ -492,7 +642,7 @@ describe("admin", () => {
       body: { status: "live" },
       headers: { authorization: `Bearer ${ADMIN}` },
     });
-    assert.equal((await send(env, "GET", "/v1/sites/books")).body.operations[0].status, "live");
+    assert.equal((await send(env, "GET", "/v1/sites/example-books")).body.operations[0].status, "live");
   });
 
   test("seed inserts the site context and its ops live, and a re-seed replaces what changed", async () => {
@@ -507,7 +657,7 @@ describe("admin", () => {
       first.body.operations.map((o: { status: string }) => o.status),
       ["live", "live"],
     );
-    const served = (await send(env, "GET", "/v1/sites/books")).body;
+    const served = (await send(env, "GET", "/v1/sites/example-books")).body;
     assert.equal(served.notes, notes);
     assert.equal(served.operations[0].lastOkAt, undefined, "a seed is no ok report");
     assert.equal(served.domain, "example.com");
@@ -520,7 +670,7 @@ describe("admin", () => {
     );
     const changed = op({ description: "Find books, better" });
     const again = await seed(env, { site, operations: [changed] });
-    const after = (await send(env, "GET", "/v1/sites/books")).body.operations;
+    const after = (await send(env, "GET", "/v1/sites/example-books")).body.operations;
     assert.deepEqual(
       after.map((o: { hash: string }) => o.hash),
       [again.body.operations[0].hash],
@@ -553,7 +703,7 @@ describe("serving", () => {
     assert.equal(r.status, 200);
     assert.equal(r.body.matches.length, 1);
     const [m] = r.body.matches;
-    assert.equal(m.name, "books");
+    assert.equal(m.name, "example-books");
     assert.equal(m.domain, "example.com");
     assert.equal(m.displayName, "Books");
     assert.deepEqual(m.operations, [
@@ -575,14 +725,14 @@ describe("serving", () => {
     await seed(env, { site, operations: [op()] });
     const r = await send(env, "GET", "/v1/index");
     const index = IndexSchema.parse(r.body);
-    assert.equal(index.sites[0]!.site, "books");
+    assert.equal(index.sites[0]!.site, "example-books");
     assert.deepEqual(index.sites[0]!.domains, ["example.com"]);
   });
 
   test("distinct ops on one endpoint are both served; versions of one op name are one", async () => {
     const { env } = registry();
     await seed(env, { site, operations: [op(), op({ name: "searchAuthors" })] });
-    const names = (await send(env, "GET", "/v1/sites/books")).body.operations.map(
+    const names = (await send(env, "GET", "/v1/sites/example-books")).body.operations.map(
       (o: { operation: { name: string } }) => o.operation.name,
     );
     assert.deepEqual(names, ["searchAuthors", "searchBooks"]);
@@ -608,7 +758,7 @@ describe("pages", () => {
   test("a landing page escapes every spec string and runs only its own script", async () => {
     const { env } = registry();
     await seed(env, { site: evil, operations: [op({ description: `Find </td>${hostile}` })] });
-    const r = await send(env, "GET", "/sites/books");
+    const r = await send(env, "GET", "/sites/example-books");
     assert.equal(r.status, 200);
     assert.match(r.headers.get("content-type")!, /text\/html/);
     assert.match(r.headers.get("content-security-policy")!, /script-src 'sha256-/);
@@ -616,7 +766,7 @@ describe("pages", () => {
     assert.match(r.text, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
     assert.equal(r.text.match(/<script>/g)?.length, 1);
     assert.match(r.text, /npx -y api-anything setup/);
-    assert.match(r.text, /api-anything call books searchBooks q=dune/);
+    assert.match(r.text, /api-anything call example-books searchBooks q=dune/);
     assert.match(r.text, /searchBooks\(q\) -&gt; title, avgRating/);
     assert.match(r.text, /Live/);
     assert.match(r.text, /<strong>bold<\/strong>/);
@@ -627,11 +777,11 @@ describe("pages", () => {
     await seed(env, { site: evil, operations: [op()] });
     const home = await send(env, "GET", "/");
     assert.equal(home.status, 200);
-    assert.match(home.text, /href="\/sites\/books"/);
+    assert.match(home.text, /href="\/sites\/example-books"/);
     assert.doesNotMatch(home.text, /<script>alert|<img src=x/);
     const q = await send(env, "GET", `/?q=${encodeURIComponent(`ratings ${hostile}`)}`);
     assert.doesNotMatch(q.text, /<script>alert/);
-    assert.match(q.text, /href="\/sites\/books"/);
+    assert.match(q.text, /href="\/sites\/example-books"/);
     const none = await send(env, "GET", "/?q=zzzzzz");
     assert.match(none.text, /No shared site matches/);
     assert.equal((await send(env, "GET", "/sites/nobody")).status, 404);
@@ -642,6 +792,6 @@ describe("pages", () => {
     await seed(env, { site, operations: [op()] });
     const r = await send(env, "GET", "/sitemap.xml");
     assert.match(r.headers.get("content-type")!, /xml/);
-    assert.match(r.text, /<loc>https:\/\/registry\.test\/sites\/books<\/loc>/);
+    assert.match(r.text, /<loc>https:\/\/registry\.test\/sites\/example-books<\/loc>/);
   });
 });
