@@ -1,15 +1,16 @@
 # Contributing
 
-## Adding a site spec
+## Adding a site
 
-Bundled specs live in `sites/<site>.json`, one file per site. A user's own copy in
-`~/.api-anything/sites/` always wins over the bundled one, and a heal writes a user copy. So a
-bundled spec is a starting point that each user's machine keeps healing. `sites/` on `main` is also
-the registry: once a spec merges, anyone can `api-anything pull <site>` it without a release.
+You don't need a pull request to add a site. Sites live in the registry service (docs/REGISTRY.md):
+when your agent learns a public read (`learn_site` over MCP, `api-anything learn` in a shell), it is
+shared as a candidate, and other installs' successful calls promote it. An op that needed a login, or
+that writes, is shared only when you run `api-anything publish <site> <op> --yes`, and a maintainer
+reviews it before anyone else gets it.
 
-The short way: after step 2 below, `api-anything publish <site> --keep-examples` previews what would
-be public and checks it against the shared rules; `--yes` then opens the pull request for you with
-the GitHub CLI. The steps below are the same thing by hand.
+`sites/` in this repository is the seed corpus: specs maintainers seeded into the registry, and the
+offline fallback the npm package ships. Changes to it are pull requests like any code. The steps below
+are how to polish a site by hand, for `sites/` or before you publish one:
 
 1. Learn the ops locally:
    ```sh

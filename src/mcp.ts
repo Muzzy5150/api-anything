@@ -43,7 +43,7 @@ export function mcpNext(next: string): string {
     )
     .replace(/api-anything add creates one/, "a new site is added with the CLI");
   return /\bapi-anything (heal|add|capture|verify|export)\b/.test(out)
-    ? `${out} (api-anything is a CLI: run it in your shell, as npx -y github:goodnight000/api-anything when the command is not installed; with no shell, ask the user)`
+    ? `${out} (api-anything is a CLI: run it in your shell, as npx -y api-anything when the command is not installed; with no shell, ask the user)`
     : out;
 }
 
