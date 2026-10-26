@@ -730,3 +730,20 @@ test("registryName: a site the registry holds keeps its name; any other goes up 
     "bundled: the registry was seeded with it",
   );
 });
+
+test("shareOps uploads a site under the name the registry serves its domain under, else under the slug", async () => {
+  shareOn();
+  saveSite(site({}, { name: "booksite", baseUrl: "https://www.example.com" }));
+  fake.matches = [{ name: "booksite", domain: "example.com", operations: [] }];
+  const [held] = await shareOps("booksite", ["search"], { evidence: { cleanReplay: "ok" } });
+  assert.equal(held!.shared, true, JSON.stringify(held));
+  assert.equal(held!.as, undefined);
+  assert.equal(fake.uploads()[0]!.site.name, "booksite");
+
+  // the registry knows no site of that name for the domain: the slug
+  fake.matches = [{ name: "booksite", domain: "booksite.com", operations: [] }];
+  const [slug] = await shareOps("booksite", ["search"], { evidence: { cleanReplay: "ok" } });
+  assert.equal(slug!.as, "example-com");
+  assert.equal(fake.uploads()[1]!.site.name, "example-com");
+  fake.matches = [];
+});

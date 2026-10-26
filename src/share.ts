@@ -4,7 +4,7 @@
  */
 import { cleanCall } from "./clean.js";
 import { loadSettings } from "./identity.js";
-import { plan } from "./publish.js";
+import { plan, uploadName } from "./publish.js";
 import { registryRequest } from "./registry.js";
 import type { Evidence, Status, UploadResult } from "./registry-api.js";
 import { flushReports } from "./report.js";
@@ -45,7 +45,9 @@ export async function shareOps(
   if (!ops.length) return [];
   let p: ReturnType<typeof plan>;
   try {
-    p = plan(site, { ops, evidence: o.evidence, parent: o.parent, consent: o.consent });
+    // the registry is asked for the site's name only when something may go up
+    const as = o.consent || loadSettings().share ? await uploadName(site, { signal: o.signal }) : undefined;
+    p = plan(site, { ops, evidence: o.evidence, parent: o.parent, consent: o.consent, ...(as ? { as } : {}) });
   } catch (e) {
     return ops.map((op) => ({ site, op, shared: false, reason: (e as Error).message.split("\n")[0] }));
   }
