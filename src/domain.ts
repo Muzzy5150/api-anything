@@ -10,3 +10,6 @@ export const siteOf = (host: string): string => {
   const h = host.toLowerCase();
   return getDomain(h, { allowPrivateDomains: true }) ?? h;
 };
+
+/** The name the registry gives a new site: its registrable domain with dots as dashes (crates.io: crates-io). */
+export const slugOf = (host: string): string => siteOf(host).replace(/\./g, "-");

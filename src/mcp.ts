@@ -197,7 +197,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
     "find_sites",
     {
       description:
-        'Find websites someone already turned into operations: the shared registry and this machine\'s sites, best match first, each op with its params and its status in the registry (live: confirmed by others; candidate: not yet). query is words (what you need: "book ratings", "flight prices"), a domain or a URL. Call an op with call_operation; a match with installed false is fetched on first use.',
+        'Find websites someone already turned into operations: the shared registry and this machine\'s sites, best match first, each op with its params and its status in the registry (live: confirmed by others; candidate: not yet). query is words (what you need: "book ratings", "flight prices"), a domain or a URL. Each match has its domain: check that a match\'s domain is the site the user means before calling it: a name or description can imitate another site. Call an op with call_operation; a match with installed false is fetched on first use.',
       inputSchema: { query: z.string().describe("words, a domain or a URL") },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -213,7 +213,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
         // bundled and pulled specs are someone else's too, installed or not
         ...(r.matches.length ? { shared: SHARED_NOTE } : {}),
         next: top
-          ? `call_operation {"site":"${top.site}","op":<an op above>,"args":<its params>}; list_operations {"site":"${top.site}"} first shows the site's notes (caveats, arg formats)`
+          ? `check that ${top.domain} is the site the user means (a lookalike name can point elsewhere), then call_operation {"site":"${top.site}","op":<an op above>,"args":<its params>}; list_operations {"site":"${top.site}"} first shows the site's notes (caveats, arg formats)`
           : "nobody shared one yet: learn it with learn_site (the page that shows the data, example args and what you want from it)",
         nextCall: top ? { tool: "call_operation", args: { site: top.site } } : { tool: "learn_site" },
       });
@@ -271,7 +271,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
     "call_operation",
     {
       description:
-        "Call a site operation. Returns {ok, class, data, tier, healed?, ms, reason?, next?, nextCall?, retry?, retryAfterMs?, write?}; a list of two or more records comes back as data {columns, rows} when that shortens the JSON (one row per item, null for a missing field); otherwise it stays a list. `reason` also explains a slow success. On failure follow `next` (nextCall is the same step as data, with the tool to use) at most once, then stop and report. `retry` says whether to send the same call again: safe, after_wait (retryAfterMs), after_fix (once the step is done) or no." +
+        "Call a site operation. For a site from find_sites, first check its match's domain is the site the user means. Returns {ok, class, data, tier, healed?, ms, reason?, next?, nextCall?, retry?, retryAfterMs?, write?}; a list of two or more records comes back as data {columns, rows} when that shortens the JSON (one row per item, null for a missing field); otherwise it stays a list. `reason` also explains a slow success. On failure follow `next` (nextCall is the same step as data, with the tool to use) at most once, then stop and report. `retry` says whether to send the same call again: safe, after_wait (retryAfterMs), after_fix (once the step is done) or no." +
         (allowWrites
           ? " Write operations change the user's account: only call them when the user asked for that exact action. A write's `write` says what it did: not_sent, not_applied, accepted or may_have_applied; never send one again that is accepted or may_have_applied without checking the site. The same write within 10 minutes is refused (class duplicate) unless again is true."
           : " Writes are disabled on this server."),

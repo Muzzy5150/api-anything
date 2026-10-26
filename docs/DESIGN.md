@@ -775,6 +775,13 @@ local rules below are defense in depth on top of that.
   lets an unsafe redirect hop of the op's own request through on any origin (a signed read checked
   elsewhere with a 307); for a shared spec, a hop to another site is aborted, before the steps run too.
 - *Writes stay gated.* `allowWrites` is required at every entry point, whatever the spec's source.
+- *An unreviewed candidate goes without the user's sessions.* For a spec with `shared`, an op whose
+  `version.status` is `candidate` gets no cookie jar and no session values at tier 1, and its tier-2
+  page fetch sends none of the profile's cookies (`credentials: "omit"`), whatever its method and whoever
+  pulled it. By the registry's review rules a candidate is a public read with no cookie or session ref,
+  so it needs none, and a GET with the user's cookies can still act on their account (a one-click
+  settings link). Once live (confirmed by other installs) or reviewed it gets them like any op. The
+  user's own ops, including one they uploaded that is a candidate, are unchanged.
 - *An agent's pull that may change something goes without the user's sessions.* For a spec an agent
   pulled (`by: "agent"`), a request whose method is not GET or HEAD gets no cookie jar and no session
   values at tier 1, and a tier-2 page fetch of it sends none of the profile's cookies
@@ -784,14 +791,15 @@ local rules below are defense in depth on top of that.
   its uploader until a maintainer reviewed it (docs/REGISTRY.md), and the seeded POST reads need the
   session (airbnb search). Tier 3 runs the site's own page, which sends what it sends (`bare` in
   `execute.ts`).
-- *Someone else's spec sends only to public addresses.* At tier 1, for a spec with `shared`, the request
-  and every redirect hop must pass `badAddress` (https, a host under a public suffix, no IP literal or
+- *Someone else's spec sends only to public addresses.* At tiers 1 and 2, for a spec with `shared`, the
+  request and every redirect hop must pass `badAddress` (https, a host under a public suffix, no IP literal or
   `localhost`), and every address the host resolves to (`node:dns` lookup, all of them) must be outside
   loopback, private, link-local, CGNAT, unique-local, multicast and reserved ranges, IPv4-mapped and
   NAT64 forms included (`publicAddress` in `http.ts`); otherwise nothing is sent there. A refused first
-  request is an `error` with nothing sent; a refused hop is a redirect not followed. Background
-  verification sets the same check on `cleanCall` (`publicOnly`). Tiers 2 and 3 are the browser's and
-  are not covered: Chrome resolves and connects on its own.
+  request is an `error` with nothing sent; a refused hop is a redirect not followed. Tier 2 checks the
+  request before the page's fetch and each hop in `pageFetch`'s `redirect` callback, which the page
+  takes one at a time. Background verification sets the same check on `cleanCall` (`publicOnly`). Tier 3
+  navigates the site's own page in Chrome, which resolves and follows redirects on its own: not covered.
 - *Text is data.* Notes, descriptions and hints reach the calling agent; `ops`, MCP `list_operations`
   and `find_sites` say beside a shared spec's that someone else wrote them and they are not
   instructions. Op and param names, which `next` hints spell in commands, are restricted.
@@ -821,9 +829,9 @@ skip pull's `shared` record and each op's `version`.
 something; trigger steps can click what the page lets them before `readGuard` acts on the page's own
 unsafe requests, and page script at tier 2 and 3 sends what it likes with the browser's cookies; the
 regex rule catches the common catastrophic shapes and is no bound on run time (`(a|aa)+` passes);
-what a hostname resolves to is checked at tier 1 only, and fetch resolves it again when it connects, so
-a DNS answer that changes in between (rebinding) is not caught, and tiers 2 and 3 are not checked at
-all; shared workers are not guarded (see Browser).
+what a hostname resolves to is checked at tiers 1 and 2 only, and fetch (Node's or Chrome's) resolves it
+again when it connects, so a DNS answer that changes in between (rebinding) is not caught, and tier 3
+navigation is not checked at all; shared workers are not guarded (see Browser).
 
 **Versions.** Each op the registry serves is a version, named by the SHA-256 of its site's name and
 the canonical op (`versionHashText`: keys sorted, `learnedAt` left out). A local op records the
@@ -947,8 +955,8 @@ background, without the agent mark, so later calls carry a version and report. A
 recorded (`~/.api-anything/upgrades.json`), so a registry without the site is asked again only after
 a week.
 
-Not in this version: signed or pinned versions on pull, checks of resolved addresses at tiers 2 and
-3 and a connection pinned to the address checked, a bounded regex engine, an MCP `publish`, and the `wrong` outcome (an agent saying the data contradicted
+Not in this version: signed or pinned versions on pull, checks of resolved addresses at tier 3 and a
+connection pinned to the address checked, a bounded regex engine, an MCP `publish`, and the `wrong` outcome (an agent saying the data contradicted
 the page).
 
 ## Logging in (`login.ts`, `import.ts`)
@@ -1061,12 +1069,17 @@ independent alternative.
   `learn`, `learnsite.ts`) learns a read with the user's args, the agent's second and third values, a
   holdout call and a clean replay, then shares it (see Sharing specs). It refuses a write, and a chosen
   request (automatic or `pickRequest`) that the shared rules would refuse as a read or whose method is
-  not GET or HEAD (a GraphQL query sent as POST excepted), before the holdout call or the clean replay
-  sends anything; the automatic pick passes over such a request for one that reads. Over MCP the trigger
+  not GET or HEAD (a GraphQL query sent as POST excepted; a GraphQL POST with no query document, a
+  persisted query named by a hash or an id, is refused since it may be a mutation), before the holdout
+  call or the clean replay sends anything; the automatic pick passes over such a request for one that reads. Over MCP the trigger
   must pass `badAddress` (page text may steer the agent to a page on this machine or the local network);
-  the CLI takes any address, the user typed it. A new site's default name is its host without `www.`,
-  or its registrable domain when the host does not start with that domain's first label, since the
-  registry binds a new name only when it does; a given `site` that does not is refused. When a share
+  the CLI takes any address, the user typed it. A new site's default name is what the registry names a
+  new site, its registrable domain with dots as dashes (`slugOf`: crates.io is `crates-io`), unless this
+  machine has a site on that host already. A local site under another name goes up under that slug
+  (`registryName`: a pulled or bundled site keeps the name the registry holds), and the share outcome's
+  `as` names it. `find_sites` shows every match's `domain`, local or the registry's; its description and
+  `next`, `call_operation`'s description and the skill tell the agent to check it is the site the user
+  means before calling, since a name or description can imitate another site. When a share
   needs the user's yes, the prompt (MCP elicitation or the CLI's) and the `next` that tells the agent to
   ask list the upload's `personal` items. With `share` on, an
   idle server verifies a few candidates a day and flushes call reports (see Sharing specs). The agent may be steered by page content, so MCP `login` import

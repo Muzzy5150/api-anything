@@ -33,6 +33,8 @@ import {
   holdsRef,
   nextHop,
   RedirectRefused,
+  refusePrivate,
+  refusePrivateHop,
   type Sent,
   send,
   withDefaults,
@@ -185,6 +187,9 @@ const NO_SESSION: Session = { cookies: [], values: {} };
  * holding a cookie or session ref), and the seeded POST reads need theirs (airbnb search).
  */
 function bare(ctx: Ctx, op: Operation): boolean {
+  // An unreviewed candidate is a public read by the registry's rules, so it needs no session; and a
+  // GET can do harm with the user's cookies too (a one-click account action), whoever pulled it.
+  if (ctx.shared && op.version?.status === "candidate") return true;
   if (ctx.shared?.by !== "agent") return false;
   const method = op.request.method.toUpperCase();
   return method !== "GET" && method !== "HEAD";
@@ -399,6 +404,8 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
       r = sent;
     } else {
       const req = buildRequest(op, ctx.args, session);
+      // someone else's spec: the page's fetch goes only to public addresses, as tier 1 does (tier 3 is not covered)
+      if (ctx.shared) await refusePrivate(op, req.url);
       const { cookie: _jar, ...headers } = req.headers; // the page sends the profile's own cookies
       r = await pageFetch({
         origin: new URL(req.url).origin,
@@ -412,7 +419,11 @@ async function tryTier(ctx: Ctx, op: Operation, tier: Tier): Promise<Attempt> {
         // the page's own cookies, unless they may not go (`bare`)
         ...(none ? { credentials: "omit" as const } : {}),
         // tier 1's policy, one hop at a time: a page's own fetch() would follow with everything aboard
-        redirect: (from, status, location, taken) => nextHop(op, session, from, status, location, taken),
+        redirect: async (from, status, location, taken) => {
+          const next = nextHop(op, session, from, status, location, taken);
+          if (ctx.shared) await refusePrivateHop(next, status);
+          return next;
+        },
       });
     }
     return { tier, status: r.status, ...(r.redirected ? { redirected: true } : {}), ...judge(op, r) };

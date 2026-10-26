@@ -9,6 +9,7 @@ import { browserAvailable, ProfileInUse } from "./browser.js";
 import { botWall, judge } from "./classify.js";
 import { cleanCall } from "./clean.js";
 import { asText } from "./codec.js";
+import { slugOf } from "./domain.js";
 import { call, type NextCall } from "./execute.js";
 import { capOutput, extract } from "./extract.js";
 import {
@@ -28,12 +29,12 @@ import { resolveLoginTarget } from "./login.js";
 import { outline } from "./outline.js";
 import type { Evidence } from "./registry-api.js";
 import { summarize } from "./search.js";
-import { safeName, siteOf } from "./session.js";
+import { safeName } from "./session.js";
 import { HOLDOUT_PURPOSE, type ShareOutcome, shareOps } from "./share.js";
 import { CheckSchema, type Operation } from "./spec.js";
 import { loadSite, updateSite } from "./store.js";
 import type { Exchange } from "./types.js";
-import { badAddress, notARead } from "./vet.js";
+import { notARead } from "./vet.js";
 
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
   .version;
@@ -190,27 +191,12 @@ function revealed(op: Operation, args: Args): string[] {
 }
 
 /**
- * The registry binds a new site's name only when it starts with the first label of the site's
- * registrable domain (crates.io: crates, crates-io, crates.io). Undefined when `name` does, or when
- * the trigger is no address the registry takes (localhost, http) and the name never goes there.
- */
-export function badSiteName(name: string, trigger: string): string | undefined {
-  if (badAddress(trigger)) return undefined;
-  const domain = siteOf(new URL(trigger).hostname);
-  const label = domain.split(".")[0]!;
-  return name.startsWith(label)
-    ? undefined
-    : `site name "${name}" does not start with "${label}", the first label of its domain ${domain}: the registry refuses a new site named otherwise`;
-}
-
-/**
- * A new site's default name: its host without www., or its registrable domain when the host does not
- * start with that domain's first label (news.ycombinator.com: ycombinator.com). A known site keeps its own.
+ * The site a trigger learns into by default: a site this machine has on that host (its session is
+ * there), else a new one named as the registry names it (`slugOf`: crates.io is crates-io).
  */
 function defaultSiteName(trigger: string): string {
   const found = resolveLoginTarget(trigger).site;
-  if (loadSite(found) || !badSiteName(found, trigger)) return found;
-  return safeName(siteOf(new URL(trigger).hostname));
+  return loadSite(found) ? found : safeName(slugOf(new URL(trigger).hostname));
 }
 
 /** A captured request as an op with no slots yet, for `notARead`. */
@@ -260,15 +246,6 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
   } catch (e) {
     return { ok: false, error: (e as Error).message, next: "pass site: a short name (letters, digits, . _ -)" };
   }
-  // a site this machine has is bound already, whatever its name; a new one must be one the registry takes
-  const badName = loadSite(site) ? undefined : badSiteName(site, input.trigger);
-  if (badName)
-    return {
-      ok: false,
-      error: badName,
-      next: `pass a site name that starts with "${siteOf(new URL(input.trigger).hostname).split(".")[0]}", or leave site out`,
-      nextCall: { action: "fix_args" },
-    };
   const existing = loadSite(site)?.site;
   let op = input.op ?? opName(input.trigger, input.args);
   if (!input.op)

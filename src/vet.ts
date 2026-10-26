@@ -177,6 +177,29 @@ const hostOf = (url: string) => {
 const argSlots = (op: Pick<Operation, "slots">) =>
   op.slots.filter((sl) => sl.param !== undefined || argHoles(sl.template ?? "").length > 0).map((sl) => sl.at.at(-1)!);
 
+/** A GraphQL request with an operation that carries no document: a JSON item, form or raw body without one. */
+function documentless(req: Request): boolean {
+  try {
+    if (new URL(req.url).searchParams.has("query")) return false;
+  } catch {
+    /* a template */
+  }
+  const body = req.body ?? "";
+  if (/graphql/i.test(req.headers["content-type"] ?? "")) return !body.trim();
+  if (/^\s*[[{]/.test(body)) {
+    try {
+      const j = JSON.parse(body);
+      return (Array.isArray(j) ? j : [j]).some((item) => {
+        const q = (item as Record<string, unknown> | null)?.query;
+        return typeof q !== "string" || !q.trim();
+      });
+    } catch {
+      return true;
+    }
+  }
+  return !new URLSearchParams(body).getAll("query").some((q) => q.trim());
+}
+
 /**
  * Why learn_site may not save this request as a read, or undefined when it may. The read rules of
  * vetShared, with a stricter method: learn_site sends what it saves (a holdout call, a clean replay)
@@ -189,6 +212,9 @@ export function notARead(op: Pick<Operation, "request" | "slots" | "params">): s
   if (graphqlDocuments(op.request).some(writesGraphql)) return "it is a GraphQL mutation";
   if (method !== "GET" && method !== "HEAD" && !(method === "POST" && graphql))
     return `a ${method} that is not a GraphQL query may change something`;
+  // a persisted query names its document by a hash or an id: nothing shows whether it is a mutation
+  if (method === "POST" && documentless(op.request))
+    return "a GraphQL POST that carries no query document (a persisted query) may be a mutation";
   const param = argSlots(op);
   if (param.some((st) => WHOLE_BODY.test(st))) return "a param is its whole body";
   if (graphql && param.some((st) => DOCUMENT_AT.test(st))) return "a param fills its GraphQL document";

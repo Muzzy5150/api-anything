@@ -1222,7 +1222,7 @@ export async function pageFetch(o: {
    * another origin with every header and the body. `taken`: the redirects before this one, for
    * the caller's limit. Without it no redirect is followed, and the redirect itself is the answer.
    */
-  redirect?: (from: Hop, status: number, location: string, taken: number) => Hop;
+  redirect?: (from: Hop, status: number, location: string, taken: number) => Hop | Promise<Hop>;
   /** "omit": send none of the profile's cookies (someone else's spec, a request that may change something) */
   credentials?: "include" | "omit";
 }): Promise<PageFetchResult> {
@@ -1311,7 +1311,7 @@ export async function pageFetch(o: {
       redirected ||= !!location;
       if (!location || !o.redirect)
         return { ...r, ms: Math.round(performance.now() - t0), ...(redirected ? { redirected } : {}) };
-      hop = o.redirect(hop, r.status, location, hops);
+      hop = await o.redirect(hop, r.status, location, hops);
     }
   } finally {
     release();

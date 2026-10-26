@@ -291,6 +291,8 @@ export interface FoundOperation {
 
 export interface Found {
   site: string;
+  /** the registrable domain its operations call: what the agent checks is the site the user means */
+  domain: string;
   displayName?: string;
   description?: string;
   /** on this machine already: its own spec, a pulled one or a bundled one */
@@ -312,6 +314,7 @@ function localSites(): Site[] {
 
 const localFound = (s: Site): Found => ({
   site: s.name,
+  domain: siteOf(new URL(s.baseUrl).hostname),
   ...(s.displayName ? { displayName: s.displayName } : {}),
   ...(s.description ? { description: s.description } : {}),
   installed: true,
@@ -369,6 +372,7 @@ export async function search(
       .map((m) => ({
         found: {
           site: m.name,
+          domain: m.domain,
           ...(m.displayName ? { displayName: m.displayName } : {}),
           ...(m.description ? { description: m.description } : {}),
           installed: false,

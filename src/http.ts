@@ -105,6 +105,19 @@ export async function publicAddress(url: string): Promise<string | undefined> {
 /** A public-only request whose own address is not public: nothing was sent. */
 export class AddressRefused extends Error {}
 
+/** Throws `AddressRefused` when `url`, the first address a public-only request of `op` goes to, is not public. */
+export async function refusePrivate(op: Operation, url: string): Promise<void> {
+  const bad = await publicAddress(url);
+  if (bad) throw new AddressRefused(`not sending ${op.name}: ${new URL(url).origin} ${bad}`);
+}
+
+/** Throws `RedirectRefused` when the next hop of a public-only request is not public. */
+export async function refusePrivateHop(hop: Request, status: number): Promise<void> {
+  const bad = await publicAddress(hop.url);
+  if (bad)
+    throw new RedirectRefused(`not following the HTTP ${status} redirect to ${new URL(hop.url).origin}: it ${bad}`);
+}
+
 /** Whether a decimal or exponent literal's exact value is past the largest safe integer (2^53 - 1) in size. */
 function pastSafeInteger(v: string): boolean {
   const [, int = "", frac = "", exp = "0"] = /^-?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(v) ?? [];
@@ -422,8 +435,7 @@ export async function send(
   opts: SendOptions,
 ): Promise<Sent> {
   const req = buildRequest(op, args, session);
-  const refusedAt = opts.publicOnly ? await publicAddress(req.url) : undefined;
-  if (refusedAt) throw new AddressRefused(`not sending ${op.name}: ${new URL(req.url).origin} ${refusedAt}`);
+  if (opts.publicOnly) await refusePrivate(op, req.url);
   await pace(opts.site, opts.minIntervalMs ?? 1000);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const signal = AbortSignal.timeout(timeoutMs);
@@ -453,11 +465,7 @@ export async function send(
       if (REDIRECT.has(res.status) && location) {
         await res.body?.cancel();
         hop = nextHop(op, session, hop, res.status, location, hops, TIER1_REDIRECTS);
-        const off = opts.publicOnly ? await publicAddress(hop.url) : undefined;
-        if (off)
-          throw new RedirectRefused(
-            `not following the HTTP ${res.status} redirect to ${new URL(hop.url).origin}: it ${off}`,
-          );
+        if (opts.publicOnly) await refusePrivateHop(hop, res.status);
         // the jar's cookies for the new address, whichever origin it is
         const { cookie: _sent, ...headers } = hop.headers;
         const cookie = cookieHeaderFor(jar, hop.url);

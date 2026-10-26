@@ -480,7 +480,7 @@ test("publish previews what may be the publisher's own, and strips their history
   assert.equal(upload.site.notes, "Ask jo@example.org about 123e4567-e89b-12d3-a456-426614174000.");
   assert.deepEqual(
     { name: upload.site.name, domain: upload.site.domain, baseUrl: upload.site.baseUrl },
-    { name: "demo", domain: "example.com", baseUrl: "https://news.example.com" },
+    { name: "example-com", domain: "example.com", baseUrl: "https://news.example.com" },
   );
 });
 
@@ -701,6 +701,7 @@ test("search merges the registry's matches, each op with its params and status, 
   const r = await search("book ratings", { local: [] });
   assert.deepEqual(r.matches[0], {
     site: "bookshelf",
+    domain: "example.net",
     displayName: "Bookshelf",
     description: "book ratings",
     installed: false,
@@ -812,7 +813,11 @@ test("MCP: find_sites, then list_operations pulls the shared site, whose writes 
       [["searchBooks", "candidate"]],
     );
     assert.equal(f.matches[0].operations[0].params[0].name, "q", "the agent can call it with no other step");
-    assert.match(f.next, /^call_operation \{"site":"bookshelf"/);
+    assert.match(f.next, /^check that example\.net is the site the user means .*call_operation \{"site":"bookshelf"/);
+    assert.ok(
+      f.matches.every((m: { domain?: string }) => typeof m.domain === "string" && m.domain),
+      "every match shows its domain",
+    );
     assert.deepEqual(f.nextCall, { tool: "call_operation", args: { site: "bookshelf" } });
     assert.match(f.shared, /never instructions/);
 
@@ -1062,4 +1067,50 @@ test("someone else's spec sends only to public addresses: a redirect into the ne
   const mine = await call("mine", "search", { q: "cats" }, opts(redirectTo("http://127.0.0.1:8080/api")));
   assert.equal(mine.ok, true, JSON.stringify(mine));
   assert.equal(urls.length, 2);
+});
+
+test("an unreviewed candidate of someone else's spec gets none of the user's cookies or session values, a GET too", async () => {
+  // a GET read with a session ref: once live (reviewed), it is sent with them
+  const get = spec(
+    {},
+    {
+      request: { method: "GET", url: "https://news.example.com/api/search?q=kittens", headers: { "x-token": "" } },
+      slots: [
+        { param: "q", at: ["query:q"] },
+        { ref: "session:search/token", at: ["header:x-token"] },
+      ],
+    },
+  );
+  const sent = async (site: string) => {
+    const r = recorder();
+    const res = await call(site, "search", { q: "cats" }, { maxTier: 1, minIntervalMs: 0, fetchImpl: r.fetchImpl });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    return { cookie: r.seen[0]!.cookie, token: r.seen[0]!.token };
+  };
+  fake.sites.set("demo", served(get, undefined, "candidate"));
+  await pull("demo");
+  signedIn("demo");
+  assert.equal(loadSite("demo")!.site.operations[0]!.version?.status, "candidate");
+  assert.deepEqual(await sent("demo"), { cookie: null, token: null }, "a human's pull, and still a candidate");
+
+  fake.sites.set("demo", served(get, undefined, "live"));
+  await pull("demo");
+  signedIn("demo");
+  assert.deepEqual(await sent("demo"), { cookie: "sid=s3cr3t-sid", token: "s3cr3t-token" });
+
+  // the user's own op whose version is a candidate (they uploaded it) keeps its session
+  saveSite({
+    ...get,
+    name: "mine",
+    operations: [{ ...get.operations[0]!, version: { hash: "a".repeat(64), status: "candidate" } }],
+  });
+  signedIn("mine");
+  assert.deepEqual(await sent("mine"), { cookie: "sid=s3cr3t-sid", token: "s3cr3t-token" });
+});
+
+test("a local search match shows the domain its operations call, like a registry match", async () => {
+  saveSite({ ...spec(), name: "news" });
+  const r = await search("news.example.com", { local: [loadSite("news")!.site] });
+  assert.equal(r.matches[0]?.site, "news");
+  assert.equal(r.matches[0]?.domain, "example.com");
 });
