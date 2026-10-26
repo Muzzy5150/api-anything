@@ -383,6 +383,87 @@ describe("a session learned signed in", () => {
   });
 });
 
+test("a write whose 200 body refuses it is not ok and is never sent again, a lost session included", async () => {
+  for (const [body, cls, step] of [
+    [{ data: { createPost: { post: null, userErrors: [{ message: "Title can't be blank" }] } } }, "error", "fix_args"],
+    [{ status: "error" }, "error", "fix_args"],
+    [{ error: "Message too long" }, "error", "fix_args"],
+    [{ error: "You are not logged in" }, "auth", "login"],
+  ] as const) {
+    seen = [];
+    const text = `refused ${JSON.stringify(body)}`;
+    const r = await call("t", "post", { text }, { ...opts(() => json(body)), allowWrites: true });
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.equal(r.class, cls, JSON.stringify(r));
+    assert.match(r.reason ?? "", /refused the write/);
+    assert.equal(seen.length, 1, "a 200 is no proof it did not run: sent once");
+    // it did not run: fix what it says first, then it may be sent
+    assert.equal(r.write, "not_applied", JSON.stringify(r));
+    assert.equal(r.server, undefined, "the site answered: no server failure");
+    assert.equal(r.nextCall?.action, step, JSON.stringify(r));
+    assert.equal(r.retry, "after_fix", JSON.stringify(r));
+    if (cls === "error") assert.match(r.next ?? "", /refused the write, so it did not run/);
+  }
+});
+
+test("a write whose 200 may have partly run, or whose redirect lands back on its form with an error, may have applied", async () => {
+  const back = (url: string) =>
+    new URL(url).pathname === "/api/post"
+      ? new Response("", { status: 303, headers: { location: "https://t.test/compose?error=blank" } })
+      : new Response("<html><form></form></html>", { headers: { "content-type": "text/html" } });
+  for (const [what, h] of [
+    ["errors beside data", () => json({ data: { createPost: { id: 1 } }, errors: [{ message: "x" }] })],
+    ["a server failure in the body", () => json({ status: 503 })],
+    ["back on the form", back],
+  ] as const) {
+    seen = [];
+    const r = await call("t", "post", { text: what }, { ...opts(h), allowWrites: true });
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.equal(r.write, "may_have_applied", `${what}: ${JSON.stringify(r)}`);
+    assert.equal(r.retry, "no", what);
+    assert.equal(r.nextCall?.action, "check_site", what);
+    assert.equal(seen.filter((s) => s.method === "POST").length, 1, what);
+    // a 5xx standing in the body is the server's own failure, as at the status line
+    assert.equal(r.server, what === "a server failure in the body" ? true : undefined, what);
+  }
+});
+
+test("a signed-in read redirected to a consent page is not drift: no heal, nothing stale, a hint to finish the page", async () => {
+  saveSite(
+    parseSite({
+      name: "consent",
+      baseUrl: "https://t.test",
+      operations: [
+        {
+          name: "me",
+          readOnly: true,
+          learnedLoggedIn: true,
+          request: { method: "GET", url: "https://t.test/api/me?v=alice", headers: {} },
+          slots: [{ param: "v", at: ["query:v"] }],
+          trigger: { url: "https://t.test/home?v={v}" },
+          params: [{ name: "v", example: "alice" }],
+          response: { extract: "data" },
+        },
+      ],
+    }),
+  );
+  const h: Handler = (url) =>
+    new URL(url).pathname === "/api/me"
+      ? new Response("", { status: 302, headers: { location: "https://t.test/privacy/consent?continue=%2Fapi%2Fme" } })
+      : new Response("<html><h1>We value your privacy</h1><button>Accept all</button></html>", {
+          headers: { "content-type": "text/html" },
+        });
+  const r = await call("consent", "me", { v: "bob" }, opts(h));
+  assert.equal(r.class, "error", JSON.stringify(r));
+  assert.match(r.reason ?? "", /t\.test\/privacy\/consent/);
+  assert.match(r.next ?? "", /https:\/\/t\.test\/privacy\/consent.*api-anything login consent/);
+  assert.equal(heals().length, 0);
+  assert.equal(staleMark("consent", "me"), undefined);
+  assert.equal(r.nextCall?.action, "login", JSON.stringify(r));
+  assert.equal(r.retry, "after_fix");
+  assert.equal(seen.filter((s) => s.url.includes("/api/")).length, 1, "no second try and no example args replay");
+});
+
 test("add --from a capture judges the op on the captured response: a wrong --extract is a warning, a right one a preview", async () => {
   const { addOperation } = await import("../src/heal.js");
   const capture = {
