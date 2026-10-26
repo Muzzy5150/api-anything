@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getDomain } from "tldts";
+import { siteOf } from "./domain.js";
 import { besideOrigins, credentialsOf, originsOf } from "./secrets.js";
 import type { StoredCookie } from "./types.js";
 
@@ -312,15 +313,7 @@ export function cookieHeaderFor(cookies: StoredCookie[], url: string, now = Date
     .join("; ");
 }
 
-/**
- * The registrable domain ("site") of a host, by the Public Suffix List including its private
- * section (github.io, run.app, amazonaws.com hosts), so a cookie ref, a Set-Cookie Domain or a
- * browser import never reaches another site. An IP, localhost or a bare suffix is its own site.
- */
-export const siteOf = (host: string): string => {
-  const h = host.toLowerCase();
-  return getDomain(h, { allowPrivateDomains: true }) ?? h;
-};
+export { siteOf };
 
 /**
  * Value for a cookie: ref. Prefers a cookie that would be sent to url; else one from the same site

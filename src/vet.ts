@@ -4,8 +4,8 @@
  * go, the pages a browser holding the user's sessions opens, and whether an op writes.
  */
 import { parse } from "tldts";
+import { siteOf } from "./domain.js";
 import { literalCredentials, scanSecrets } from "./secrets.js";
-import { siteOf } from "./session.js";
 import type { Operation, Request, Site } from "./spec.js";
 
 export const LIMITS = {
