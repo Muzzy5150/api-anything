@@ -1,0 +1,19 @@
+{
+  "name": "api-anything-registry",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "api-anything-registry",
+      "database_id": "f47f4475-3e2f-4df2-9f24-32921eef82c6",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // archive what nobody called successfully in 30 days
+  "triggers": { "crons": ["17 3 * * *"] }
+  // secrets: ADMIN_TOKEN, SALT (wrangler secret put). Thresholds (rules.ts) can be set as vars.
+}
