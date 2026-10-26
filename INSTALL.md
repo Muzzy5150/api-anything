@@ -19,24 +19,12 @@ of any Chromium executable).
 
 ## 2. Install the command
 
-The package isn't on npm yet, so build it from a temporary clone. Run this whole block as one
-command (it works in sh, bash and zsh, and removes the clone whether or not it succeeds):
-
 ```sh
-(
-  dir="$(mktemp -d)" || exit
-  trap 'rm -rf "$dir"' 0
-  git clone -q --depth 1 https://github.com/goodnight000/api-anything.git "$dir" &&
-    cd "$dir" &&
-    npm ci --no-audit --no-fund &&
-    archive="$(npm pack --silent)" &&
-    npm install -g "$archive"
-)
+npm install -g api-anything --no-audit --no-fund
 ```
 
-A non-zero exit status means the clone, the build or the install failed: stop and show the user
-the output. Don't use `npm install -g github:goodnight000/api-anything`, because it fails under npm 11. If
-the global install fails with a permission error (EACCES), don't use sudo. Tell the user and stop.
+A non-zero exit status means the install failed: stop and show the user the output. If it fails
+with a permission error (EACCES), don't use sudo. Tell the user and stop.
 
 ## 3. Check that it works
 

@@ -1,6 +1,6 @@
 {
   "name": "api-anything",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Learn reusable operations from a website's browser traffic and call them from a CLI, library or MCP server.",
   "license": "MIT",
   "type": "module",
@@ -39,7 +39,8 @@
     "demo": "node examples/research.mjs",
     "pages": "tsx scripts/pages.ts",
     "health": "tsx scripts/health.ts",
-    "review": "tsx scripts/review.ts"
+    "review": "tsx scripts/review.ts",
+    "prepublishOnly": "npm run check && npm run lint"
   },
   "keywords": [
     "api",
@@ -66,5 +67,9 @@
     "@types/node": "^26.6.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "homepage": "https://goodnight000.github.io/api-anything",
+  "bugs": {
+    "url": "https://github.com/goodnight000/api-anything/issues"
   }
 }

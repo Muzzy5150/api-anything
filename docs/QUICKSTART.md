@@ -13,28 +13,23 @@ The shortest path is to paste this into your coding agent:
 [INSTALL.md](../INSTALL.md) lists the steps the agent follows. By hand:
 
 ```sh
-git clone https://github.com/goodnight000/api-anything.git
-cd api-anything
-npm ci
-npm install -g "$(npm pack --silent)"
+npm install -g api-anything
 api-anything sites
 api-anything call hacker-news search query=sqlite
 ```
 
 The last command should return `ok: true`, `tier: 1`, and a list of stories. It does not need an
 account or a browser. `ok: false` includes a class, reason and next step. CLI failures exit nonzero.
-For a reproducible deployment, run `git checkout <commit>` before `npm ci` and update that pin
-only after testing. Packing first avoids an npm 11 global Git-install failure that omits build
-dependencies. The installed command contains built files and does not depend on keeping the clone.
-The package is not published to npm yet. npm must be allowed to run its `prepare` script.
+For a reproducible deployment, install an exact version (`npm install -g api-anything@0.2.0`) and
+update that pin only after testing.
 
 To try a read without a global install, this path is also verified:
 
 ```sh
-npx -y github:goodnight000/api-anything call hacker-news search query=sqlite
+npx -y api-anything call hacker-news search query=sqlite
 ```
 
-Use `github:goodnight000/api-anything#<commit>` with `npx` to pin a revision.
+Use `api-anything@<version>` with `npx` to pin a release.
 
 ## Connect an agent
 

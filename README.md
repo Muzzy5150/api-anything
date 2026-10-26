@@ -38,11 +38,8 @@ something like "What does Goodreads rate Piranesi?"
 <details>
 <summary>Install by hand</summary>
 
-The package isn't on npm yet. Don't use `npm install -g github:...`, because it fails under npm 11.
-
 ```sh
-git clone https://github.com/goodnight000/api-anything.git && cd api-anything
-npm ci && npm install -g "$(npm pack --silent)"
+npm install -g api-anything
 api-anything call hacker-news search query=sqlite
 ```
 

@@ -12,7 +12,7 @@ report the transport tier and elapsed time.
 When a request drifts, the runtime tries to repair it; failure is reported. Everything is
 local, under `~/.api-anything` (`API_ANYTHING_HOME` overrides it).
 
-Run the CLI as `api-anything` (or `npx -y github:goodnight000/api-anything`). Its output is one line of JSON. A failure also
+Run the CLI as `api-anything` (or `npx -y api-anything`). Its output is one line of JSON. A failure also
 prints a `next:` line on stderr. If the MCP server is connected, `list_sites`, `find_sites`, `list_operations`
 and `call_operation` do the same as `sites`, `search`, `ops` and `call`, and `login` refreshes a session.
 Over MCP, `list_operations` pulls a shared site `find_sites` found the first time it is asked for, with
