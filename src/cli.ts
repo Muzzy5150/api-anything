@@ -24,9 +24,11 @@ import { AmbiguousProfile } from "./import.js";
 import { type Candidate, capturePages, pageUrls, rankCandidates } from "./learn.js";
 import { cookieNames, importSession, logout, resolveLoginTarget } from "./login.js";
 import { type Outline, outline } from "./outline.js";
-import { plan, submit, writeOutbox } from "./publish.js";
+import { plan } from "./publish.js";
 import { pull, search } from "./registry.js";
+import { settle } from "./report.js";
 import { loadSession, loggedIn, saveSession, sessionFile, withLock } from "./session.js";
+import { shareOps } from "./share.js";
 import { CheckSchema, HtmlRecipeSchema, MatchSchema, type Operation, type Param, TriggerStepSchema } from "./spec.js";
 import { exportSite, listSites, loadSite, siteNotes, updateSite } from "./store.js";
 import type { Exchange, TriggerStep } from "./types.js";
@@ -150,30 +152,30 @@ const HELP: Record<string, string> = {
   Writes a shareable spec: examples and response shapes stripped, and refused if a live cookie or
   session value is inside. --keep-examples keeps param examples you confirmed are public (so verify works).`,
   search: `api-anything search <words | domain | url>
-  Finds sites someone already turned into operations: the registry's index (shared specs) and the
-  specs on this machine, best match first. Words match a site's name, its description and what its
-  operations do and return ("book ratings"); a domain or a URL matches the sites whose operations
-  use it (news.ycombinator.com). Each match says whether it is installed; pull one that is not.
-  API_ANYTHING_REGISTRY overrides the registry (its index.json beside sites/).`,
+  Finds sites someone already turned into operations: the shared registry and the specs on this
+  machine, best match first, each op with its params and its status in the registry. Words match a
+  site's name, its description and what its operations do and return ("book ratings"); a domain or a
+  URL matches the sites whose operations use it (news.ycombinator.com). Each match says whether it is
+  installed; pull one that is not. API_ANYTHING_REGISTRY overrides the registry's URL.`,
   pull: `api-anything pull <site>
-  Fetches a spec someone shared from the registry (the api-anything repo's sites/ on GitHub) into
-  ~/.api-anything/registry, so you can call it without learning it. Someone else wrote it: it is
-  checked against the shared rules first, and its writes still need --allow-writes. Prints each op
-  (method, hosts, write, login) and the warnings a human should read; a pull again names what changed.
-  API_ANYTHING_REGISTRY overrides the registry's base URL.`,
-  publish: `api-anything publish <site> [--keep-examples] [--yes]
-  Shares a spec you learned: opens a pull request adding it to the registry, so others can pull it
-  instead of learning the site again. Without --yes it only previews: the exact files that would be
-  public (written to ~/.api-anything/outbox), what was stripped, the warnings, and what may be yours
-  (an email, an account id, a literal typed into the page). It refuses a spec holding a live cookie or
-  session value. --yes sends that preview, unchanged, with the GitHub CLI (gh, signed in): a fork, a
-  branch, commits under your account's noreply address, and a public pull request under your account.
-  --keep-examples keeps param examples you confirmed are public (so verify works for others).`,
+  Fetches a site someone shared from the registry into ~/.api-anything/registry, so you can call it
+  without learning it. Someone else wrote it: it is checked against the shared rules first, and its
+  writes still need --allow-writes. Prints each op (method, hosts, write, login, status) and the
+  warnings a human should read; a pull again names what changed. API_ANYTHING_REGISTRY overrides the
+  registry's URL.`,
+  publish: `api-anything publish <site> [op ...] [--yes]
+  Shares the ops of a site you learned (all of them, or the ones named) with the registry, so others
+  can call them instead of learning the site again. Without --yes it only previews: exactly what each
+  upload sends, what was stripped, the warnings, and what may be yours (an email, an account id, a
+  literal typed into the page). The param examples are sent: they must be values anyone may see. It
+  refuses an op holding a live cookie or session value, or failing its checks. --yes sends them, signed
+  with this install's key; an op that needed a login or writes is reviewed before others get it.`,
   mcp: `api-anything mcp [--allow-writes]
-  Serves list_sites, find_sites, list_operations, call_operation and login over stdio MCP. MCP cannot
-  learn operations (use capture/add here). list_operations pulls a shared site an agent asks for, with
-  its reads only: its writes need a human's api-anything pull. Its login only refreshes a session a
-  human imported here.`,
+  Serves list_sites, find_sites, list_operations, call_operation, login and learn_site over stdio MCP.
+  list_operations and call_operation pull a shared site an agent asks for, with its reads only: its
+  writes need a human's api-anything pull. Its login only refreshes a session a human imported here.
+  With sharing on, an idle server checks a few new shared operations a day, over plain HTTP with no
+  cookies, and reports how calls went.`,
 };
 
 const USAGE = `api-anything ${VERSION}: turn a website into operations an agent can call.
@@ -967,53 +969,50 @@ async function cmdPull({ pos }: Parsed): Promise<number> {
 }
 
 async function cmdPublish({ v, pos }: Parsed): Promise<number> {
-  const { site } = requireSite(pos[0]);
-  const keepExamples = v["keep-examples"];
-  const again = `api-anything publish ${site.name}${keepExamples ? " --keep-examples" : ""}`;
+  const [name, ...ops] = pos;
+  const { site } = requireSite(name);
+  const again = `api-anything publish ${[site.name, ...ops].join(" ")}`;
+  let p: ReturnType<typeof plan>;
+  try {
+    p = plan(site.name, { ops });
+  } catch (e) {
+    throw new Fail(oneLine((e as Error).message), `api-anything ops ${site.name}`);
+  }
+  if (p.errors.length)
+    throw new Fail(
+      `refusing to publish ${p.site}: ${p.errors.length} problem(s)`,
+      "fix each one (a live value: re-add the op so learning makes it a ref; a failing check: see api-anything verify) and preview again",
+      { errors: p.errors },
+    );
   if (!v.yes) {
-    const p = plan(site.name, { keepExamples });
-    if (p.errors.length)
-      throw new Fail(
-        `refusing to publish ${p.site}: ${p.errors.length} problem(s)`,
-        "fix each one (a live value: re-add the op so learning makes it a ref) and preview again",
-        { errors: p.errors },
-      );
     out({
       ok: true,
       site: p.site,
-      files: writeOutbox(p),
+      uploads: p.ops.map((o) => o.upload),
       operations: p.operations,
       stripped: p.stripped,
       warnings: p.warnings,
       personal: p.personal,
       checks: p.checks,
-      public: "the files and the pull request are public, under your GitHub account",
-      next: `show the user the files and every warning and personal item; only with their explicit OK: ${again} --yes`,
+      public: "each upload is public: anyone can fetch it from the registry, param examples included",
+      next: `show the user each upload and every warning and personal item; only with their explicit OK: ${again} --yes`,
     });
     return 0;
   }
-  let r: Awaited<ReturnType<typeof submit>>;
-  try {
-    r = await submit(site.name, { keepExamples });
-  } catch (e) {
-    const m = (e as Error).message;
-    throw new Fail(
-      m,
-      /no preview|changed since/.test(m)
-        ? `preview it first (${again}), show the user, then send that with --yes`
-        : /not installed|auth|HTTP 401/.test(m)
-          ? "install the GitHub CLI and sign in: gh auth login"
-          : /already public in your fork/.test(m)
-            ? "tell the user the files may be public in their fork; fix the cause and run it again to open the pull request"
-            : "no file of the spec was sent; fix the cause and run it again",
-    );
-  }
+  const shared = await shareOps(
+    site.name,
+    p.ops.map((o) => o.op),
+    { evidence: {}, consent: true },
+  );
+  const ok = shared.every((s) => s.shared);
   out({
-    ok: true,
-    ...r,
-    next: "a maintainer reviews the pull request and CI checks it with the shared rules; once it merges, anyone can api-anything pull it",
+    ok,
+    shared,
+    next: ok
+      ? "others can call them now; one that needed a login or writes is served to others once a maintainer reviews it"
+      : "fix the reason given for each op that was not shared, then run it again",
   });
-  return 0;
+  return ok ? 0 : 1;
 }
 
 async function cmdMcp({ v }: Parsed): Promise<number> {
@@ -1062,7 +1061,7 @@ const COMMANDS: Record<string, { run: (p: Parsed) => number | Promise<number>; f
   export: { run: cmdExport, flags: ["out", "keep-examples", "force"] },
   search: { run: cmdSearch, flags: [] },
   pull: { run: cmdPull, flags: [] },
-  publish: { run: cmdPublish, flags: ["keep-examples", "yes"] },
+  publish: { run: cmdPublish, flags: ["yes"] },
   mcp: { run: cmdMcp, flags: ["allow-writes"] },
 };
 
@@ -1095,6 +1094,8 @@ async function run(argv: string[]): Promise<number> {
 try {
   const code = await run(process.argv.slice(2));
   if (code >= 0) {
+    // the answer is out: reports and heal-backs get a moment, never a wait the user notices
+    await settle(1500);
     await closeBrowser();
     process.exitCode = code;
   }

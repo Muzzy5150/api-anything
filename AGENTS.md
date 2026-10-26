@@ -23,8 +23,9 @@ holds the evidence behind it, including the api-anything bugs that must not come
 | `src/session.ts`, `src/store.ts` | `~/.api-anything`: cookie jar, specs, heal log, state, write ledger, export |
 | `src/checks.ts` | `verify`: run each read's example and checks, judge pass/fail/inconclusive, keep the record `publish` gates on |
 | `src/vet.ts` | the shared rules a spec someone else wrote must pass: on pull, publish, load and in CI |
-| `src/registry.ts`, `src/publish.ts` | pull a shared spec from the registry (`sites/` on GitHub); publish one as a pull request via `gh` |
-| `src/registry.ts` (index), `scripts/pages.ts` | the registry index CI serves on Pages; `search` and MCP `find_sites` read it |
+| `src/registry.ts` | the registry service's client (`docs/REGISTRY.md`, wire contract `src/registry-api.ts`): `pull`, `search`, the bundled upgrade |
+| `src/publish.ts`, `src/share.ts` | what an upload sends and the scans before it (`publish` previews it); `shareOps` sends what the rules allow, signed; the heal-back |
+| `src/report.ts`, `src/background.ts` | reports of calls of registry versions, in the background; an idle MCP server's verification of candidates |
 | `src/login.ts`, `src/import.ts` | sign in by importing the everyday browser's cookies; re-import on `auth` |
 | `src/cli.ts`, `src/mcp.ts`, `src/index.ts` | entry points |
 

@@ -1131,9 +1131,11 @@ function saveHealed(
       outcome: "failed",
       reason: `refusing to save a healed spec containing a credential: ${secrets.join("; ")}`,
     };
+  // a healed op is no longer the registry version it was; the heal-back (share.ts) may upload it as a new one
+  const { version: _v, ...healed } = op;
   updateSite(site, (current) => {
     if (!current) throw new Error(`site "${site}" disappeared during heal`);
-    return putOperation(current, op);
+    return putOperation(current, healed);
   });
   recordOrigins(site, opUrls(op));
   appendHeal({ site, op: op.name, strategy, diff });

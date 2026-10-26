@@ -732,24 +732,24 @@ header, a random value under a credential's name), and warns about a literal IP 
 `remoteHost` the page reported), whole or inside a longer leaf (`ip:port`, an x-forwarded-for list,
 `ip=` text; a version string after a letter or `/`, or one ending in `.0`, is not one). Names an op lists in `public` are allowed.
 
-## Sharing specs (`registry.ts`, `publish.ts`, `vet.ts`)
+## Sharing specs (`registry.ts`, `share.ts`, `publish.ts`, `report.ts`, `background.ts`, `vet.ts`)
 
-Someone who reverse-engineered a site publishes the spec; anyone else pulls it instead of learning it
-again. The registry is this repository's `sites/` directory on GitHub: a contribution is a pull
-request, a maintainer reviews it, and CI runs the same rules `pull` runs. The npm package's bundled
-`sites/` is a snapshot of it; `pull` gets what merged since the release. No server of our own, no
-GitHub token handled by api-anything, nothing sent without the user asking.
-
-**Never automatic.** Sharing is one command after a human looked at a preview. A spec learned from
-a logged-in session encodes things no scan can tell from public constants (an account id in a path,
-an intranet host, what the person uses), so nothing uploads on its own.
+Agents share one catalog of operations through the registry service (`registry/`, a Cloudflare
+Worker), and fill, verify and repair it as a side effect of using it. `docs/REGISTRY.md` is the design
+of the service and the crowd rules (candidate, live, degraded, review; promotion by reports); the wire
+contract is `src/registry-api.ts`. This section is the client's side. The base URL is `REGISTRY_API`;
+`API_ANYTHING_REGISTRY` overrides it (https, or http to localhost for tests). Every request refuses
+redirects, has a timeout and reads its answer while streaming up to a cap. Uploads, reports and
+verify jobs are signed with the install's Ed25519 key (`identity.ts`). Nothing is uploaded, reported
+or verified unless setup's question was answered yes (`settings.json` `share`), except an upload the
+user consents to.
 
 **Trust model.** A spec is executable configuration: it names the URLs a call sends the user's
 cookies and session values to, the pages a browser holding the user's sessions opens and what it
-clicks there, and whether an op writes. The registry's specs are trusted as the bundled ones are,
-because a maintainer reviewed them like code; `API_ANYTHING_REGISTRY` points at another repository
-only for someone who trusts it the same way. The local rules below are defense in depth for a review
-that missed something, not a sandbox for anonymous specs.
+clicks there, and whether an op writes. A pulled spec is someone else's. The service runs the shared
+rules and the export secret scan on every upload and serves a version that needed a login, writes,
+sends off its site or lists `public` names only to its uploader until a maintainer reviews it. The
+local rules below are defense in depth on top of that.
 
 **What keeps a pulled spec from turning the user's sessions against them:**
 
@@ -764,10 +764,10 @@ that missed something, not a sandbox for anonymous specs.
 - *A cookie ref's site fallback never takes an HttpOnly cookie.* The fallback (a cookie of
   www.site.com echoed to api.site.com) models page script copying a cookie, and no script can read an
   HttpOnly one; without the rule a host-only session cookie would reach every host of its site.
-- *Provenance survives a heal.* `pull` stamps the spec with `shared: {from, sha256}`. A heal writes
+- *Provenance survives a heal.* `pull` stamps the spec with `shared: {from, sha256, by?}`. A heal writes
   a user copy that keeps it, and `loadSite` runs the shared rules on every spec that has it or lives
   in the registry directory, so tightened rules reach copies too; a registry file without it is no
-  file pull wrote, and is refused. `export` and `publish` strip it. A bundled spec ships inside the
+  file pull wrote, and is refused. `export` and uploads strip it. A bundled spec ships inside the
   package and is trusted as its code is: it keeps rescan.
 - *A shared spec heals by recapture only.* A rescan sends a token it found in the site's own pages to
   the op's request URL before any check, and the spec chose that URL.
@@ -775,12 +775,12 @@ that missed something, not a sandbox for anonymous specs.
   lets an unsafe redirect hop of the op's own request through on any origin (a signed read checked
   elsewhere with a 307); for a shared spec, a hop to another site is aborted, before the steps run too.
 - *Writes stay gated.* `allowWrites` is required at every entry point, whatever the spec's source.
-- *Text is data.* Notes, descriptions and hints reach the calling agent; `ops` and MCP
-  `list_operations` say beside a shared spec's that someone else wrote them and they are not
+- *Text is data.* Notes, descriptions and hints reach the calling agent; `ops`, MCP `list_operations`
+  and `find_sites` say beside a shared spec's that someone else wrote them and they are not
   instructions. Op and param names, which `next` hints spell in commands, are restricted.
 
-**The shared rules** (`vetShared`), run on pull, on publish, on load, and by CI over `sites/`.
-Errors refuse: every URL an op sends to or opens (request, trigger, soft-from, `goto` value or
+**The shared rules** (`vetShared`), run on pull, on every upload (here and by the service), on load,
+and by CI over the bundled `sites/`. Errors refuse: every URL an op sends to or opens (request, trigger, soft-from, `goto` value or
 selector) is https on a host under a public suffix (no IP, `localhost`, single-label or
 `.local`/`.internal`-style name), and so is `baseUrl`; no literal credential in a request (the
 export rule) outside the op's `public` names; `readOnly` only on GET, HEAD and POST, never on a
@@ -794,51 +794,85 @@ regexes (`pick` `~`, `embedded`, param `pattern`) at most 200 characters with no
 inside a quantified group; at most 50 operations, descriptions and hints at most 500 characters,
 notes at most 8 KB, the file at most 256 KB; a param's `enum` at most 100 values of at most 500
 characters each; at most 10 checks per op, each arg a param of the op and at most 500 characters, a
-purpose at most 500; no checks on a write (verify would send it); no `unproven` mark. Warnings, shown to the human and put in the pull
-request for the reviewer: reads sent as POST, writes, ops learned logged in, literal `public` values
-(a shared bearer makes every user's calls that account's), requests or triggers off the spec's own
-site (Algolia behind Hacker News, AppSync behind Goodreads), and the export scan's shape heuristics.
+purpose at most 500; no checks on a write (verify would send it); no `unproven` mark. Warnings, shown
+to the human: reads sent as POST, writes, ops learned logged in, literal `public` values (a shared
+bearer makes every user's calls that account's), requests or triggers off the spec's own site
+(Algolia behind Hacker News, AppSync behind Goodreads), and the export scan's shape heuristics, which
+skip pull's `shared` record and each op's `version`.
 
-**What the rules do not cover, so review does.** A read sent as GET or as a non-GraphQL POST can
-still change something; trigger steps can click what the page lets them before `readGuard` acts on
-the page's own unsafe requests, and page script at tier 2 and 3 sends what it likes with the
-browser's cookies; the regex rule catches the common catastrophic shapes and is no bound on run time
-(`(a|aa)+` passes); hostnames are checked, not what they resolve to, so a public name pointing at a
-private address is not refused; shared workers are not guarded (see Browser).
+**What the rules do not cover.** A read sent as GET or as a non-GraphQL POST can still change
+something; trigger steps can click what the page lets them before `readGuard` acts on the page's own
+unsafe requests, and page script at tier 2 and 3 sends what it likes with the browser's cookies; the
+regex rule catches the common catastrophic shapes and is no bound on run time (`(a|aa)+` passes);
+hostnames are checked, not what they resolve to, so a public name pointing at a private address is
+not refused; shared workers are not guarded (see Browser).
 
-**Pull.** `api-anything pull <site>` fetches `sites/<site>.json` (and `<site>.md` if present) from
-`https://raw.githubusercontent.com/goodnight000/api-anything/main` (`API_ANYTHING_REGISTRY`
-overrides: https, or http to localhost for tests), with redirects refused, a size cap read while
-streaming, and a timeout. It parses the spec (unknown fields stripped), checks its name is the one
-asked for, runs `vetShared`, and writes it to `~/.api-anything/registry/<site>.json` with its notes,
-notes first. Resolution is user → registry → bundled. It refuses when a local spec or session of that
-name belongs to another site (one name is one session), and reports when the user's own copy
-shadows the pulled one. Output: each op (`name(params) -> fields`, method, hosts, write, login), the
-warnings, and what changed since the last pull. A call or `ops` for a site that does not exist says
-`next: api-anything pull <site>` before suggesting `capture`.
+**Versions.** Each op the registry serves is a version, named by the SHA-256 of its site's name and
+the canonical op (`versionHashText`: keys sorted, `learnedAt` left out). A local op records the
+version it is as `version: {hash, status}`, set by `pull` and by an upload. It is this machine's
+record, like `learnedAt`: never uploaded, exported or part of verify's op hash, and a heal drops it,
+since the healed op is no longer that version.
 
-**Publish.** `api-anything publish <site>` builds the export (examples, shapes, `learnedAt` and
-`shared` stripped; examples kept with `--keep-examples`) and refuses on any live secret, with no
-`--force`: the export's scan, plus a second exact scan of the spec and the notes against this
-machine's cookies and session values that no `public` name waives (a public name keeps a shared
-bearer out of the shape heuristics, never out of this), run over the exact bytes of the outgoing
-files so a key is read as well as a value; and it refuses a spec over pull's 256 KB. It runs `vetShared`, and lists what may be
-the publisher's own for them alone, never in the pull request: an email address, a UUID or a
-literal IP anywhere in the spec (keys included) or the notes, a run of 5+ digits in a URL path no param
-fills, a literal typed by a `fill` step, a param default. Without `--yes` it stops after the preview:
-the exact files written to `~/.api-anything/outbox/`, what was stripped, every warning, and that the
-pull request is public under the user's GitHub account. `--yes` makes the plan again and sends it
-only if it hashes to the preview's, so what the human approved is what is sent. Sending is the
-GitHub REST API through the GitHub CLI (`gh api`, `API_ANYTHING_GH` overrides the binary): fork the
-registry, sync the fork, create a branch `share/<site>-<hash>` from the registry's main, put each
-file with the account's noreply address as author and committer (not the user's git email), and
-open the pull request with the ops and warnings as its body. Nothing is cloned, so no hook, filter
-or symlink of a repository runs; every call has fixed arguments with its body as JSON on stdin; what
-`gh` answers is checked against the shape expected before it is used in a path. A second run with
-the same content reuses the branch and reports the open pull request. A failure after a file
-may have reached the fork (an upload whose answer was lost counts) says the files may be public
-there, and on which branch. The agent skill shows the
-preview to the user and runs `--yes` only on their explicit OK.
+**Pull.** `api-anything pull <site>` asks `GET /v1/sites/<site>` for the site's best version of each op
+and its notes. It checks the answer is the site asked for and that its domain is its `baseUrl`'s,
+builds the spec with each op's `version`, runs `vetShared`, refuses a spec over 256 KB, and writes it
+to `~/.api-anything/registry/<site>.json` with its notes, notes first, and the record
+`shared: {from, sha256 of the spec written, by?}`. Resolution is user → registry → bundled. It refuses
+when a local spec or session of that name belongs to another site (one name is one session), and
+reports when the user's own copy shadows the pulled one. Output: each op (`name(params) -> fields`,
+method, hosts, write, login, status), the warnings, and what changed since the last pull. A call or
+`ops` for a site that does not exist says `next: api-anything pull <site>` before suggesting `capture`.
+
+**Agents pull.** MCP `list_operations` and `call_operation` on a site that is not installed pull it,
+so an agent with no shell reaches every shared site. Pulled this way, the record says `by: "agent"`,
+and the server neither lists nor runs its writes, whatever `--allow-writes` says: page text may have
+steered the agent to it, so a write waits for an `api-anything pull` from the CLI, which rewrites the
+record without `by`, in the user's own copy too when one shadows the pulled spec (a heal's, or one an
+`add` extended). The mark binds this server only: an agent with a shell can run the CLI itself, as it
+always could. Its reads run with what the user already set up and nothing more: a session exists only
+if a human logged in to that site with the CLI or a login window, and session values stay bound to
+their hosts.
+
+**Search.** `api-anything search <words | domain | url>` and MCP `find_sites` ask `GET /v1/search`
+and merge the answer with the specs on this machine (the user's, pulled and bundled) as `installed`,
+the local copy winning, so a site learned here and never shared is found too; a registry that cannot
+be reached leaves the local ones with a `registryError`. Each match lists its ops with their params and
+status, so the agent can call one next. A registry match reaches the agent as text, so it is held to
+the shared rules' limits (a site name as `safeName` allows, op and param names the rules allow, an op
+signature, texts of at most 500 characters, at most 50 ops); one that breaks them is dropped, not
+the rest. The registry ranks its own matches; local specs are scored here: a domain or URL query
+matches the specs whose ops use its registrable domain; words (lower-cased, under 3 letters and
+common words such as "the", "in" or "best" left out, a plural `s` dropped but not from "news") are
+scored against the site's name (most), its title and domains, then its description and ops (op names
+and fields split at camelCase; part of a longer word there counts from 5 letters), a word that
+matches nothing counting against the site, and a local site under a third of the best score matched
+a stray word and is left out. With no match, `find_sites` answers `nextCall: {tool: "learn_site"}`.
+
+**Sharing what this install learned (`shareOps`).** Each op's upload (`VersionUpload`) is built by
+`publish.ts`'s `plan`: the export's stripping (no example values in the request, no response shapes,
+no `learnedAt`, no `shared`, no `version`), the param examples kept (learning arranges for them to be
+the agent's chosen second example and holdout, never the user's own request), the site context
+(name, domain, baseUrl, display fields, login cookies) and the caller notes (`<site>.md` before
+`## Maintainer notes`). An op is public when its clean replay was ok (`cleanCall`: no cookies, no
+session values, plain HTTP), it was learned signed out, it reads, every host it sends to or opens is
+on its site's domain, and it lists no `public` names. A public op uploads when `share` is on or with
+`consent`; anything else only with `consent: true`, and otherwise the answer is `needsConsent`. A
+public op holding what may be the user's own (below) waits for consent too. Before sending, each
+upload must pass the shared rules and two secret scans, with no override: the export's, and an exact
+scan of the upload's bytes against this machine's cookies and session values that no `public` name
+waives (a public name keeps a shared bearer out of the shape heuristics, never out of this), keys
+included; an upload over 256 KB is refused. What may be the user's own is listed for them, and goes
+in the outcome of a consented op for the caller to show: an email address, a UUID or a literal IP
+anywhere in the upload (keys included) or the notes, a run of 5+ digits in a URL path no param
+fills, a literal typed by a `fill` step, a param default, an `enum` value holding a run of 5+ digits,
+and every check's args. It is sent signed to `POST /v1/versions`, and the answer's hash and status
+become the local op's `version`.
+
+**Publish.** `api-anything publish <site> [op ...]` is the human's way to share: without `--yes` it
+previews each upload exactly as it would be sent, what was stripped, every warning, what may be the
+user's own, and verify's record of each op's checks; `--yes` sends them through `shareOps` with
+`consent: true`. Both refuse an op that fails the scans or the shared rules, or `checks.ts`'s gate
+(below). The agent skill shows the preview to the user and runs `--yes` only on their explicit OK.
 
 **Proof before sharing (`checks.ts`).** A read may carry `checks: [{args, expect, purpose?}]`:
 args a human confirmed on the site and what it answers them with, `result` (data), `empty` (its own
@@ -850,57 +884,45 @@ each read's stored example (expecting `result`) and its checks through `call`, h
 does, and judges every case: `pass`, `fail`, or `inconclusive` when the answer is `blocked`, `auth`,
 `rate` or a server that failed or could not be reached (`CallResult.server`), which says nothing
 about the op. Its outcomes are kept per op in `~/.api-anything/checks/<site>.json`, with a hash of
-the op as it was after the run (a heal during verify included; `learnedAt` and `unproven` aside),
-so an op changed since has no record. When two passing cases whose args differ only in an op's
-`unproven` params answer differently, verify clears the mark. `publish` refuses an op marked
+the op as it was after the run (a heal during verify included; `learnedAt`, `unproven` and `version`
+aside), so an op changed since has no record. When two passing cases whose args differ only in an
+op's `unproven` params answer differently, verify clears the mark. `publish` refuses an op marked
 `unproven`, an op with checks and no record for its current version, and any counted case that
 failed: every counted case must pass, with no percentage bar, because there are two or three
 human-confirmed cases, not a suite in which one wrong case should be outvoted. Inconclusive cases
-count neither way. The pull request carries the record as a table (case, args of checks, expect,
-outcome), never a failure's reason, which may quote the publisher's pages, nor the example's
-args, which export strips. An op with neither examples nor checks is shown as not verified, and
-does not block. Check args are literals the publisher typed, shared with the spec: the personal
-scan lists every check's args for the publisher to confirm, and an `enum` value holding a run of 5+
-digits (an account's id rather than one of the site's options).
+count neither way. Check args are literals the publisher typed, shared with the op: the personal
+scan lists them for the publisher to confirm.
 
-**Search.** `api-anything search <words | domain | url>` and MCP `find_sites` read the registry's
-index: `index.json`, which CI builds from `sites/` on every push to main (`scripts/pages.ts`, the
-Pages workflow) and serves on GitHub Pages, so contributors never edit a shared file and two pull
-requests never conflict over it. With `API_ANYTHING_REGISTRY` set, the index is `index.json` beside
-that registry's `sites/`. Each entry: the site, its title and description, the registrable domains its
-ops send to or open, the spec's SHA-256, and each op as pull summarizes it with its description. The
-index is fetched like a spec (no redirect, a size cap, a timeout), kept for 10 minutes by a running
-process, and held to the shared rules' limits, since it reaches the agent as text: a site name as
-`safeName` allows, an op signature whose name the rules allow, texts of at most 500 characters, at
-most 50 ops. An entry that breaks them is dropped, not the whole index. Search output always says
-the texts are someone else's. Local specs
-(the user's, pulled and bundled) are merged in as `installed`, so a site learned here and never shared
-is found too, and an index that cannot be fetched leaves those with a `registryError`. A domain or URL
-query matches the entries whose domains hold its registrable domain; words (lower-cased, under
-3 letters and common words such as "the", "in" or "best" left out, a plural `s` dropped but not from
-"news") are scored against the site's name (most), its title and domains, then its description and
-ops (op names and fields split at camelCase; part of a longer word there counts from 5 letters), a
-word that matches nothing counting against the site; a site under a third of
-the best score matched a stray word and is left out. No ranking by use or health yet.
+**Reports (`report.ts`).** After every `call()` of an op that carries a `version`, with `share` on, a
+report `{hash, outcome, tier, ms}` is queued: ok → `ok`, drift and error → `fail`, auth, blocked, rate
+and input as they are; a call refused before anything was sent (a write without `allowWrites`, a
+duplicate) reports nothing, and a call that healed the op reports `fail` for the version it was,
+whose stored request drifted. No args and no data. Reports go in signed batches of 50 to
+`POST /v1/reports`, in the background, and are dropped when the registry cannot be reached: a call
+never waits or fails for one. The CLI waits at most 1.5 s for the background work after its answer
+is out, then stops it; the MCP server flushes every 5 seconds and on exit.
 
-**Agents pull.** MCP `list_operations` on a site that is not installed pulls it from the registry,
-so an agent with no shell reaches every shared site, and the user never has to know a site's name.
-Pulled this way, the spec's record says `by: "agent"`, and the server neither lists nor runs its
-writes, whatever `--allow-writes` says: page text may have steered the agent to it, so a write waits
-for an `api-anything pull` from the CLI, which rewrites the record without `by`, in the user's own copy
-too when one shadows the pulled spec (a heal's, or one an `add` extended). The mark binds this server
-only: an agent with a shell can run the CLI itself, as it always could. Its reads run with
-what the user already set up and nothing more: a session exists only if a human logged in to that
-site with the CLI or a login window, and session values stay bound to their hosts. This is the same
-trust as a human's pull, since the registry's specs are reviewed (see Trust model), and the same rules
-run on it on every load.
+**Heal back.** When a call heals an op that was a registry version and `share` is on, the healed op
+is replayed clean with its examples (`cleanCall`); when that is ok and the op is public, it is
+uploaded with `parent` and `evidence.healedFrom` set to the old hash, and its new version recorded.
+Otherwise it stays a local op with no version.
 
-**Nudges, not automation.** Once `verify <site>` passes for a site the user learned, its output
-says it can be shared (`next: api-anything publish <site>`). The skill tells the agent to `search`
-before `capture`.
+**Background verification (`background.ts`).** An MCP server with `share` on that has seen no message
+in or out for 60 s asks `GET /v1/verify-jobs` (signed) for candidates this install has not reported,
+fetches each candidate's op from `GET /v1/sites/<site>` (matched by hash; not installed, held to the
+shared rules), calls it with the job's args through `cleanCall`, never with the user's sessions, and
+reports the outcome. At most 20 a day (`~/.api-anything/verify-jobs.json`); a round stops when the
+client goes away.
 
-Not in this version: signed or commit-pinned pulls, health reports from users' calls, runtime
-checks of resolved addresses, a bounded regex engine, and MCP `publish`.
+**Bundled specs.** The package's `sites/` stays an offline fallback, trusted as the package is. The
+first call of a bundled site with no `version`, with `share` on, pulls the registry's copy in the
+background, without the agent mark, so later calls carry a version and report. An attempt is
+recorded (`~/.api-anything/upgrades.json`), so a registry without the site is asked again only after
+a week.
+
+Not in this version: signed or pinned versions on pull, runtime checks of resolved addresses, a
+bounded regex engine, an MCP `publish`, and the `wrong` outcome (an agent saying the data contradicted
+the page).
 
 ## Logging in (`login.ts`, `import.ts`)
 
@@ -1003,12 +1025,16 @@ independent alternative.
     program. `test/execute.test.ts` checks the fields over every class, a read and a write, and
     what was sent.
 - **MCP server** (`api-anything mcp`) with fixed meta-tools: `list_sites`, `find_sites`, `list_operations`,
-  `call_operation`, and `login` (so an agent can fix an `auth` failure itself), so the tool list
-  costs the same at 2 sites or 200. `find_sites` is `search` (see Sharing specs); `list_operations` on
-  a site that is not installed pulls it from the registry first (see "Agents pull" below). The agent may be steered by page content, so MCP `login` import
+  `call_operation`, `login` (so an agent can fix an `auth` failure itself) and `learn_site`
+  (`mcp-learn.ts`), so the tool list costs the same at 2 sites or 200. `find_sites` is `search` (see
+  Sharing specs): each match's ops with their params and registry status, `nextCall`
+  `{tool: "call_operation", args: {site}}` for the best match, or `{tool: "learn_site"}` with none;
+  `list_operations` and `call_operation` on a site that is not installed pull it from the registry first
+  (see "Agents pull"), and `list_operations` shows each op's registry status. With `share` on, an
+  idle server verifies a few candidates a day and flushes call reports (see Sharing specs). The agent may be steered by page content, so MCP `login` import
   only refreshes a site that has a spec and a browser source a human chose with the CLI, from that
   same profile; anything else answers `next`: ask the user to run `api-anything login <site>`. Mode
-  window is allowed (a human signs in). MCP cannot learn operations: capture and add are CLI only. Writes are hidden unless
+  window is allowed (a human signs in). Writes are hidden unless
   it is started with `--allow-writes`. `list_operations` carries each op's `returns`, the site's notes and each param's
   `hint`/`pattern`. A `next` served over MCP names the tools (`list_operations {"site":"x"}`, the
   `login` tool) instead of CLI commands, and tells the agent to run a CLI-only one (heal, add) in its
@@ -1030,5 +1056,5 @@ independent alternative.
 ## Non-goals (v1)
 
 TLS impersonation transports, CAPTCHA solving, signature reimplementation, seroval parsing,
-a hosted registry service or marketplace (sharing is pull requests to `sites/`, see above), typed-client codegen, and Windows app-bound cookie decryption
+a marketplace (the registry stores and counts; see Sharing specs), typed-client codegen, and Windows app-bound cookie decryption
 (login falls back to `--window` there).
