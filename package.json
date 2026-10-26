@@ -37,7 +37,8 @@
     "lint": "biome ci .",
     "format": "biome check --write .",
     "demo": "node examples/research.mjs",
-    "pages": "tsx scripts/pages.ts"
+    "pages": "tsx scripts/pages.ts",
+    "review": "tsx scripts/review.ts"
   },
   "keywords": [
     "api",

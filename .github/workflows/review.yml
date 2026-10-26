@@ -1,0 +1,123 @@
+name: Registry review
+
+# Sorts each pull request to the registry by risk (scripts/review.ts): one comment, and one of the labels
+# `registry: low-risk` / `registry: needs-review`. With the repository variable AUTO_MERGE_LOW_RISK set to
+# 'true', a low-risk one gets auto-merge, which merges only once branch protection's required checks pass.
+#
+# pull_request_target runs this file and scripts/review.ts as they are on main, with a token that can
+# write. That is safe only because nothing of the pull request runs: the checkout is main, the pull
+# request's files are read through the API as data, and no title, branch name, path or file content is
+# put into a shell line (values reach the scripts through env and files).
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths: ["sites/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: registry-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  GH_REPO: ${{ github.repository }}
+  PR: ${{ github.event.pull_request.number }}
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      verdict: ${{ steps.report.outputs.verdict }}
+    steps:
+      # main, not the pull request: the default ref of pull_request_target
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Fetch the pull request's files as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: npm run --silent review -- fetch "$RUNNER_TEMP/review"
+      # no token in reach of the step that parses what the pull request wrote
+      - name: Review them
+        id: report
+        env:
+          AUTO_MERGE: ${{ vars.AUTO_MERGE_LOW_RISK == 'true' }}
+        run: |
+          npm run --silent review -- report "$RUNNER_TEMP/review"
+          verdict=$(cat "$RUNNER_TEMP/review/verdict")
+          case "$verdict" in
+            low | review | fail) echo "verdict=$verdict" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unexpected verdict" >&2; exit 1 ;;
+          esac
+      - name: Comment and label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.report.outputs.verdict }}
+        run: |
+          dir="$RUNNER_TEMP/review"
+          gh label create "registry: low-risk" --color 0e8a16 --force \
+            --description "A read-only change the review bot found low risk"
+          gh label create "registry: needs-review" --color d93f0b --force \
+            --description "A maintainer reviews this registry change by hand"
+          if [ "$VERDICT" = low ]; then label="registry: low-risk"; else label="registry: needs-review"; fi
+          # exactly one of the two, keeping every other label
+          gh api --paginate "repos/$GH_REPO/issues/$PR/labels?per_page=100" --jq '.[].name' > "$dir/labels.txt"
+          jq -R -s --arg label "$label" \
+            '{labels: ((split("\n") | map(select(. != "" and . != "registry: low-risk" and . != "registry: needs-review"))) + [$label])}' \
+            "$dir/labels.txt" > "$dir/labels.json"
+          gh api -X PUT "repos/$GH_REPO/issues/$PR/labels" --input "$dir/labels.json" > /dev/null
+          # the bot's own comment: by the marker, and posted by this workflow's token, not one someone copied it into
+          ids=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- api-anything registry review -->"))) | .id')
+          id=${ids%%$'\n'*}
+          jq -n --rawfile body "$dir/comment.md" '{body: $body}' > "$dir/comment.json"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" --input "$dir/comment.json" > /dev/null
+          else
+            gh api "repos/$GH_REPO/issues/$PR/comments" --input "$dir/comment.json" > /dev/null
+          fi
+      # a run that broke leaves no low-risk label behind from an earlier push
+      - name: Ask for review when this run fails
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "registry: needs-review" --color d93f0b --force \
+            --description "A maintainer reviews this registry change by hand"
+          gh api -X DELETE "repos/$GH_REPO/issues/$PR/labels/registry:%20low-risk" > /dev/null 2>&1 || true
+          gh api "repos/$GH_REPO/issues/$PR/labels" -f "labels[]=registry: needs-review" > /dev/null
+
+  # Enabling auto-merge needs contents: write, so it is its own job, which checks out and runs nothing but gh.
+  auto-merge:
+    needs: review
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # pinned to the commit reviewed: a later push does not ride on this approval
+      - name: Merge once the required checks pass
+        if: needs.review.outputs.verdict == 'low' && vars.AUTO_MERGE_LOW_RISK == 'true'
+        run: gh pr merge "$PR" --auto --squash --match-head-commit "$HEAD_SHA"
+      - name: Turn auto-merge off for a pull request that is no longer low risk
+        if: needs.review.outputs.verdict != 'low'
+        run: |
+          if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = true ]; then
+            gh pr merge "$PR" --disable-auto
+          fi

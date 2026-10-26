@@ -53,7 +53,7 @@ export function badAddress(url: string): string | undefined {
 }
 
 /** Every address an op sends to or opens: its request, trigger, soft-from page and goto steps. */
-function addresses(op: Operation): [string, string][] {
+export function addresses(op: Operation): [string, string][] {
   return [
     ["request", op.request.url],
     ["trigger", op.trigger.url],

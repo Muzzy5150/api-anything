@@ -42,6 +42,15 @@ the GitHub CLI. The steps below are the same thing by hand.
    `extract`). Say only what a key means when its name doesn't, and when a key can be missing.
 6. In the PR description, say what you verified, on what date, and whether you were logged in.
 
+What happens next: a bot reads your files (it never runs them) and posts one comment, updated on every
+push, with each site's verdict, the reasons, the shared rules' warnings and its ops; it labels the pull
+request `registry: low-risk` or `registry: needs-review`. Low risk is narrow: every op is a GET or
+HEAD read, not learned logged in, with no `public` values, on the spec's own site, the files change
+nothing outside `sites/<site>.json` and `sites/<site>.md`, and an update adds no host and comes from
+someone who already authored that site's spec on main. Anything else is no judgement of your spec: a
+maintainer reviews it by hand. When the maintainers have turned auto-merge on, a low-risk pull request
+merges by itself once CI passes; the comment says so.
+
 Rules for bundled specs (CI checks the mechanical ones with `vetShared`, in `test/registry.test.ts`):
 
 - Read ops first. A write (`"readOnly": false`) must have been learned with `--write`, which

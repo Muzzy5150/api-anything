@@ -736,7 +736,8 @@ header, a random value under a credential's name), and warns about a literal IP 
 
 Someone who reverse-engineered a site publishes the spec; anyone else pulls it instead of learning it
 again. The registry is this repository's `sites/` directory on GitHub: a contribution is a pull
-request, a maintainer reviews it, and CI runs the same rules `pull` runs. The npm package's bundled
+request, a bot sorts it by risk, a maintainer reviews it (see Review), and CI runs the same rules
+`pull` runs. The npm package's bundled
 `sites/` is a snapshot of it; `pull` gets what merged since the release. No server of our own, no
 GitHub token handled by api-anything, nothing sent without the user asking.
 
@@ -747,7 +748,8 @@ an intranet host, what the person uses), so nothing uploads on its own.
 **Trust model.** A spec is executable configuration: it names the URLs a call sends the user's
 cookies and session values to, the pages a browser holding the user's sessions opens and what it
 clicks there, and whether an op writes. The registry's specs are trusted as the bundled ones are,
-because a maintainer reviewed them like code; `API_ANYTHING_REGISTRY` points at another repository
+because a maintainer reviewed them like code, or, with auto-merge on, the review bot found them in its
+narrow low-risk class (see Review); `API_ANYTHING_REGISTRY` points at another repository
 only for someone who trusts it the same way. The local rules below are defense in depth for a review
 that missed something, not a sandbox for anonymous specs.
 
@@ -805,6 +807,33 @@ the page's own unsafe requests, and page script at tier 2 and 3 sends what it li
 browser's cookies; the regex rule catches the common catastrophic shapes and is no bound on run time
 (`(a|aa)+` passes); hostnames are checked, not what they resolve to, so a public name pointing at a
 private address is not refused; shared workers are not guarded (see Browser).
+
+**Review.** A bot sorts every pull request to `sites/` on main (`scripts/review.ts`, the Registry
+review workflow). It keeps one comment on the pull request, updated on every push, and sets exactly one
+of the labels `registry: low-risk` and `registry: needs-review`. For each site touched the comment says
+whether it is new, updated or removed, gives `vetShared`'s errors and warnings, and lists each op as
+pull summarizes it, with every piece of spec text in a code span so it renders as nothing else. A site
+is low risk only when its spec passes the shared rules and fits pull's 256 KB; every op is a read sent as
+GET or HEAD, not learned logged in, with no `public` names; every request, trigger, soft-from and `goto`
+host is on the spec's own registrable site; and an update adds no host, turns no read into a write, and
+comes from an owner of the site: a GitHub login that authored a commit touching `sites/<site>.json` on
+main (the API's author login, or the login in a noreply address), so a new site's author owns it once
+it merges. A pull request is low risk when every site it touches is and it changes nothing but
+`sites/<site>.json` and `sites/<site>.md`; a shared-rules error fails it, and anything else needs review,
+with each reason listed. With the repository variable `AUTO_MERGE_LOW_RISK` set to `true`, a low-risk
+pull request gets auto-merge, pinned to the commit reviewed, and GitHub squash-merges it once branch
+protection's required checks pass (CI, which runs the shared rules again); without required checks,
+auto-merge would merge at once, so the variable is off by default. A push that makes it riskier is
+relabeled and has auto-merge turned off. The bot never runs a spec: whether its ops work is for `verify`
+and the health check, and CI's tests, to say, and everything in the paragraph above stays unreviewed in a
+low-risk spec (a GET can still change something, trigger steps still click), which is why the low-risk
+class is narrow. The workflow runs on `pull_request_target`, which hands it a token that can comment on
+and label pull requests from forks. That is safe because only main's code runs: it checks out main,
+reads the pull request's files through the API at its head commit as data, keeps the token out of the
+step that parses them, and passes no title, branch name, path or file content through a shell line.
+Enabling auto-merge needs `contents: write`, so a second job that checks out nothing does only that. A
+merge GitHub makes for the workflow's token starts no push workflow, so the Pages index picks up an
+auto-merged site on the next push to main or a manual run of Pages.
 
 **Pull.** `api-anything pull <site>` fetches `sites/<site>.json` (and `<site>.md` if present) from
 `https://raw.githubusercontent.com/goodnight000/api-anything/main` (`API_ANYTHING_REGISTRY`
