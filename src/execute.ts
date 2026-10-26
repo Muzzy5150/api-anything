@@ -178,16 +178,16 @@ interface Ctx {
 const NO_SESSION: Session = { cookies: [], values: {} };
 
 /**
- * Whether this op of someone else's spec goes without the user's cookies and session values. A request
- * that is no GET or HEAD may change something whatever the spec says it is; it gets them only when it
- * says so (a write), the call allows writes, and a human pulled the spec (not an agent: page text may
- * have steered it there). The user's own specs, and bundled ones not upgraded, are not affected.
+ * Whether this op goes without the user's cookies and session values: a request that is no GET or HEAD,
+ * of a spec an agent pulled (page text may have steered it there), may change something whatever the
+ * spec says it is. A human's pull and a bundled spec upgraded from the registry keep them: the registry
+ * serves no such op to anyone but its uploader until a maintainer reviewed it (a POST read, a slot
+ * holding a cookie or session ref), and the seeded POST reads need theirs (airbnb search).
  */
 function bare(ctx: Ctx, op: Operation): boolean {
-  if (!ctx.shared) return false;
+  if (ctx.shared?.by !== "agent") return false;
   const method = op.request.method.toUpperCase();
-  if (method === "GET" || method === "HEAD") return false;
-  return !(ctx.shared.by !== "agent" && !op.readOnly && ctx.opts.allowWrites);
+  return method !== "GET" && method !== "HEAD";
 }
 
 /** What one attempt did to a write. */

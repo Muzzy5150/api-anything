@@ -966,7 +966,7 @@ function recorder() {
   return { seen, fetchImpl };
 }
 
-test("someone else's op that is no GET or HEAD gets none of the user's cookies or session values, unless a human pulled a write and writes are allowed", async () => {
+test("an op an agent pulled that is no GET or HEAD gets none of the user's cookies or session values; a human's pull keeps them", async () => {
   const sends = async (site: string, q: string, o: { allowWrites?: boolean } = {}) => {
     const r = recorder();
     const res = await call(site, "search", { q }, { maxTier: 1, minIntervalMs: 0, fetchImpl: r.fetchImpl, ...o });
@@ -978,11 +978,15 @@ test("someone else's op that is no GET or HEAD gets none of the user's cookies o
   const all = { cookie: "sid=s3cr3t-sid", token: "s3cr3t-token" };
   const creds = (s: { cookie: string | null; token: string | null }) => ({ cookie: s.cookie, token: s.token });
 
-  // a "read" sent as POST: it may be a write, so it goes bare
+  // a "read" sent as POST that an agent pulled: it may be a write, so it goes bare
   share(post(true));
-  await pull("demo");
+  await pull("demo", { by: "agent" });
   signedIn("demo");
   assert.deepEqual(creds(await sends("demo", "cats")), none);
+  // the same POST read a human pulled keeps them: the registry served it only after review (airbnb search)
+  await pull("demo");
+  signedIn("demo");
+  assert.deepEqual(creds(await sends("demo", "cats")), all);
 
   // a write a human pulled, called with writes allowed: the user asked for it
   share(post(false));
