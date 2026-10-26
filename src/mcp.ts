@@ -36,7 +36,11 @@ export function mcpNext(next: string): string {
     .replace(/api-anything ops ([\w.-]+)/g, 'list_operations {"site":"$1"}')
     .replace(/api-anything sites/g, "list_sites")
     .replace(/api-anything search ([\w.-]+)/g, 'find_sites {"query":"$1"}')
-    .replace(/api-anything pull ([\w.-]+)/g, 'list_operations {"site":"$1"} (it pulls a shared site)')
+    // a pull the user is asked to run is the human's consent, which an agent's pull is not
+    .replace(
+      /(?<!in a terminal: )api-anything pull ([\w.-]+)/g,
+      'list_operations {"site":"$1"} (it pulls a shared site)',
+    )
     .replace(
       /(?:ask the user to run:? )?api-anything login ([\w.-]+)/g,
       'the login tool {"site":"$1"} (mode "window" when the user must sign in or clear a challenge by hand)',

@@ -14,7 +14,7 @@ import { verifySite } from "../src/checks.js";
 import { call, heal } from "../src/execute.js";
 import { healOperation } from "../src/heal.js";
 import { resolver } from "../src/http.js";
-import { createServer as createMcpServer } from "../src/mcp.js";
+import { createServer as createMcpServer, mcpNext } from "../src/mcp.js";
 import { type OpPlan, plan } from "../src/publish.js";
 import { pull, search, summarize } from "../src/registry.js";
 import type { SearchMatch } from "../src/registry-api.js";
@@ -1114,3 +1114,50 @@ test("a local search match shows the domain its operations call, like a registry
   assert.equal(r.matches[0]?.site, "news");
   assert.equal(r.matches[0]?.domain, "example.com");
 });
+
+test("an unconfirmed candidate an agent pulled never runs in the browser profile: a call that needs tier 3 says a human's pull allows it", async () => {
+  // no browser can start in this test: what is checked is that none is asked for
+  const browser = process.env.API_ANYTHING_BROWSER;
+  process.env.API_ANYTHING_BROWSER = "/nonexistent/chromium";
+  try {
+    await unconfirmedCandidate();
+  } finally {
+    if (browser === undefined) delete process.env.API_ANYTHING_BROWSER;
+    else process.env.API_ANYTHING_BROWSER = browser;
+  }
+});
+
+async function unconfirmedCandidate() {
+  // a read only the site's own page answers (minTier 3)
+  const paged = spec({}, { minTier: 3 });
+  fake.sites.set("demo", served(paged, undefined, "candidate"));
+  await pull("demo", { by: "agent" });
+  const urls: string[] = [];
+  const fetchImpl = (async (u: string | URL | Request) => {
+    urls.push(String(u));
+    return json({ hits: [] });
+  }) as typeof fetch;
+  const r = await call("demo", "search", { q: "cats" }, { minIntervalMs: 0, fetchImpl });
+  assert.deepEqual([r.ok, r.class, r.tier], [false, "blocked", 3], JSON.stringify(r));
+  assert.match(r.reason ?? "", /unconfirmed operation an agent pulled: it never runs in the user's browser profile/);
+  assert.match(r.next ?? "", /unconfirmed and needs the browser.*run in a terminal: api-anything pull demo/);
+  assert.equal(r.nextCall?.action, "report");
+  assert.deepEqual(urls, [], "nothing was sent");
+  // over MCP the hint stays a human's pull, not the agent's list_operations (which would not lift it)
+  assert.match(mcpNext(r.next!), /run in a terminal: api-anything pull demo/);
+  assert.doesNotMatch(mcpNext(r.next!), /list_operations/);
+
+  // a forced heal does not recapture it either
+  const h = await heal("demo", "search", { q: "cats" }, { minIntervalMs: 0, fetchImpl });
+  assert.equal(h.ok, false);
+  assert.doesNotMatch(JSON.stringify(h), /runs the trigger|recaptured/);
+
+  // the same candidate a human pulled, and a live one an agent pulled, may use the browser as before
+  await pull("demo");
+  const human = await call("demo", "search", { q: "cats" }, { minIntervalMs: 0, fetchImpl });
+  assert.match(human.reason ?? "", /tier 3 needs a Chromium browser/, JSON.stringify(human));
+  fake.sites.set("demo", served(paged, undefined, "live"));
+  await pull("demo", { by: "agent" });
+  const live = await call("demo", "search", { q: "cats" }, { minIntervalMs: 0, fetchImpl });
+  assert.match(live.reason ?? "", /tier 3 needs a Chromium browser/, JSON.stringify(live));
+}

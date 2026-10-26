@@ -782,6 +782,16 @@ local rules below are defense in depth on top of that.
   so it needs none, and a GET with the user's cookies can still act on their account (a one-click
   settings link). Once live (confirmed by other installs) or reviewed it gets them like any op. The
   user's own ops, including one they uploaded that is a candidate, are unchanged.
+- *An unconfirmed candidate an agent pulled never runs in the user's browser profile.* For a spec
+  pulled with `by: "agent"`, an op whose `version.status` is `candidate` runs at tiers 1 and 2 only
+  (`unconfirmed` in `execute.ts`): no tier-3 trigger run, whose steps would click what the spec says
+  with the user's sessions aboard, no recapture heal (a trigger run too), no trigger run to refresh
+  session values, and no copy of the profile's cookies into the jar. A call that needs tier 3 (its
+  `minTier`, or an escalation past a wall) answers `blocked` at tier 3 with nothing sent: the operation is
+  unconfirmed and needs the browser, and a human can allow it by running `api-anything pull <site>` in a
+  terminal, which drops the agent mark (MCP's `next` keeps that command as it is, instead of rewriting it
+  to `list_operations`, whose pull would not lift it). A live op, a human's pull, and the user's own
+  ops are unchanged.
 - *An agent's pull that may change something goes without the user's sessions.* For a spec an agent
   pulled (`by: "agent"`), a request whose method is not GET or HEAD gets no cookie jar and no session
   values at tier 1, and a tier-2 page fetch of it sends none of the profile's cookies

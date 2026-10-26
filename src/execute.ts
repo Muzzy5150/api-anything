@@ -175,7 +175,31 @@ interface Ctx {
   log: Attempt[];
   /** the site's `shared` record: someone else wrote this spec (pulled, or a bundled one upgraded from the registry) */
   shared?: Site["shared"];
+  /** `unconfirmed`: no browser run in the user's profile for it (tier 3, a recapture, a cookie refresh) */
+  unconfirmed?: boolean;
 }
+
+/**
+ * An unreviewed candidate an agent pulled: nobody but its uploader has seen it work, and page text may
+ * have steered the agent to it. It runs at tiers 1 and 2 only, never as a trigger run in the user's
+ * browser profile, whose steps click what the spec says with the user's sessions aboard. A human's pull
+ * (no `by: "agent"`) is the consent that lifts it, as for an agent pull's writes.
+ */
+const unconfirmed = (site: Site, op: Operation) => site.shared?.by === "agent" && op.version?.status === "candidate";
+
+/** The answer to a call of an `unconfirmed` op that needs tier 3. */
+const needsHuman = (site: string, notes: string[]): Result => ({
+  ok: false,
+  class: "blocked",
+  tier: 3,
+  reason: [
+    ...notes,
+    "needs tier 3 (the site's own page in the browser), and this is an unconfirmed operation an agent pulled: it never runs in the user's browser profile",
+  ].join("; "),
+  next: `the operation is unconfirmed and needs the browser: do not retry. A human can allow it: ask the user to look at the site's operations and, if they trust them, run in a terminal: api-anything pull ${site}`,
+  nextCall: { action: "report" },
+  retry: "after_fix",
+});
 
 const NO_SESSION: Session = { cookies: [], values: {} };
 
@@ -595,7 +619,8 @@ async function onDrift(ctx: Ctx, site: Site, op: Operation, a: Attempt): Promise
       validate: (candidate) => attempt(ctx, candidate, Math.min(a.tier, 2) as Tier),
       fetchImpl: ctx.opts.fetchImpl,
       loginCookies: site.loginCookies,
-      browser: ctx.maxTier > 1,
+      // a recapture runs the trigger in the user's profile
+      browser: ctx.maxTier > 1 && !ctx.unconfirmed,
     }),
   );
   if (h.outcome === "healed") return success(h.attempt, { healed: true });
@@ -820,7 +845,16 @@ export async function call(
       return false;
     }
   };
-  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log, shared: site.shared };
+  const capped = unconfirmed(site, op);
+  const ctx: Ctx = {
+    site: siteName,
+    args,
+    opts,
+    maxTier: capped ? (Math.min(opts.maxTier ?? 3, 2) as Tier) : (opts.maxTier ?? 3),
+    log,
+    shared: site.shared,
+    unconfirmed: capped,
+  };
   const remembered = rememberedTier(siteName, op.name);
   // A remembered escalation is a speed hint, not a requirement: under a lower cap, start at the op's own tier.
   let tier = Math.max(op.minTier, remembered !== undefined && remembered <= ctx.maxTier ? remembered : 1) as Tier;
@@ -832,6 +866,7 @@ export async function call(
   let examplesChecked = false;
   for (;;) {
     if (tier > ctx.maxTier) {
+      if (capped && tier === 3 && (opts.maxTier ?? 3) >= 3) return done(needsHuman(siteName, notes));
       return done({
         ok: false,
         class: "blocked",
@@ -910,7 +945,8 @@ export async function call(
       if (tier === 3 || ctx.maxTier <= 1) return fail();
       if (authStep < 2) {
         authStep = 2;
-        if (await refreshCookies(ctx, op, tier)) continue;
+        // the profile's cookies into the jar: none of the user's session is touched for an unconfirmed op
+        if (!ctx.unconfirmed && (await refreshCookies(ctx, op, tier))) continue;
       }
       authStep = 3;
       // Session values (a bearer, a guest token) come from the site's own requests: a trigger run
@@ -1000,14 +1036,23 @@ export async function heal(
       retry: "no",
     });
   }
-  const ctx: Ctx = { site: siteName, args, opts, maxTier: opts.maxTier ?? 3, log, shared: site.shared };
+  const capped = unconfirmed(site, op);
+  const ctx: Ctx = {
+    site: siteName,
+    args,
+    opts,
+    maxTier: capped ? (Math.min(opts.maxTier ?? 3, 2) as Tier) : (opts.maxTier ?? 3),
+    log,
+    shared: site.shared,
+    unconfirmed: capped,
+  };
   const tier = Math.min(Math.max(op.minTier, rememberedTier(siteName, op.name) ?? 1), 2) as Tier;
   const h = await safeHeal(
     healOperation(siteName, op, args, {
       validate: (c) => attempt(ctx, c, tier),
       fetchImpl: opts.fetchImpl,
       loginCookies: site.loginCookies,
-      browser: ctx.maxTier > 1,
+      browser: ctx.maxTier > 1 && !capped,
     }),
   );
   if (h.outcome === "healed") return done(success(h.attempt, { healed: true }), { strategy: h.strategy });
