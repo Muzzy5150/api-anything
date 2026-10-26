@@ -77,9 +77,13 @@ status (`POST /v1/admin/versions/:hash`).
   version with `parent` and `evidence.healedFrom`; one confirmation promotes it.
 - Identical repairs from many installs hash the same: each upload of an existing version counts as
   its uploader's confirmation.
-- Versions of one op are grouped by its match (method, host, path, GraphQL operationName). The best
-  is served: live over candidate over degraded, then by success rate, then by confirmations.
-- A version with no ok report in 30 days is archived.
+- Versions of one op are grouped by its site and op name; each version also stores its match (method,
+  host, path, GraphQL operationName). The match alone would merge distinct ops that share an endpoint
+  (goodreads `getBook` and `getWorkId` both match `/book/show/*`). The best is served: live over
+  candidate over degraded, then by success rate, then by confirmations.
+- A daily job archives a candidate or degraded version with no ok report in 30 days, and any version
+  older than a live version of the same op, which replaced it. A live version never times out: it
+  leaves live only by degrading.
 
 ## Trust
 

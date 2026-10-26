@@ -5,11 +5,12 @@ import type { Operation } from "../../src/spec.js";
 import { networksOf, sha256Hex, signer } from "./auth.js";
 import { catalog, entryOf, search } from "./catalog.js";
 import { CSP, homePage, sitemap, sitePage } from "./pages.js";
-import { nextStatus, type Thresholds, thresholds } from "./rules.js";
+import { nextStatus, type Thresholds, thresholds, toArchive } from "./rules.js";
 import {
   addSite,
   addVersion,
   archive,
+  archiveCandidates,
   archiveOldSeeds,
   count,
   type D1Database,
@@ -423,11 +424,17 @@ export default {
     }
   },
 
-  /** The daily job: archive what nobody has called successfully in the recent window. */
+  /** The daily job: archive stale candidates and degraded versions, and what a newer live version replaced. */
   async scheduled(controller: { scheduledTime: number }, env: Env): Promise<void> {
     const now = controller.scheduledTime;
     const cutoff = new Date(now - thresholds(env).recentDays * DAY).toISOString();
-    const n = await archive(env.DB, cutoff, new Date(now).toISOString(), Math.floor(now / HOUR));
-    console.log(`archived ${n} versions`);
+    const gone = toArchive(await archiveCandidates(env.DB), cutoff);
+    await archive(
+      env.DB,
+      gone.map((v) => v.hash),
+      new Date(now).toISOString(),
+      Math.floor(now / HOUR),
+    );
+    console.log(`archived ${gone.length} versions`);
   },
 };

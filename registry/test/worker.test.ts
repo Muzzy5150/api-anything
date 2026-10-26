@@ -365,23 +365,46 @@ describe("maintenance by the crowd", () => {
     assert.equal((await send(env, "GET", "/v1/verify-jobs")).status, 401);
   });
 
-  test("the daily job archives versions with no ok in 30 days", async () => {
+  test("the daily job archives stale candidates and degraded versions, and what a newer live version replaced", async () => {
     const { env, raw } = registry();
-    const old = (await send(env, "POST", "/v1/versions", { as: install(), body: upload() })).body.hash;
-    const fresh = (
-      await send(env, "POST", "/v1/versions", {
-        as: install(),
-        body: upload({ operation: op({ name: "bookPage", match: { host: "www.example.com", path: "/api/book" } }) }),
-      })
-    ).body.hash;
-    raw
-      .prepare("UPDATE versions SET created_at = ?, updated_at = ? WHERE hash = ?")
-      .run("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z", old);
+    const OLD = "2026-01-01T00:00:00.000Z";
+    const age = (hash: string, status?: string) =>
+      raw
+        .prepare(`UPDATE versions SET created_at = ?${status ? ", status = ?" : ""} WHERE hash = ?`)
+        .run(...(status ? [OLD, status, hash] : [OLD, hash]));
+    const named = (name: string) => op({ name, match: { host: "www.example.com", path: `/api/${name}` } });
+    const post = async (operation: unknown) =>
+      (await send(env, "POST", "/v1/versions", { as: install(), body: upload({ operation }) })).body.hash as string;
+
+    const live = (await seed(env, { site, operations: [op(), named("quiet")] })).body.operations;
+    const staleCandidate = await post(named("stale"));
+    const freshCandidate = await post(named("fresh"));
+    const staleDegraded = await post(named("degraded"));
+    for (const v of live) age(v.hash);
+    age(staleCandidate);
+    age(staleDegraded, "degraded");
+    // a heal of searchBooks goes live: the seed's version of it is replaced
+    const heal = await post(
+      op({ request: { method: "GET", url: "https://www.example.com/api/search?q=dune&v=2", headers: {} } }),
+    );
+    await send(env, "POST", `/v1/admin/versions/${heal}`, {
+      body: { status: "live" },
+      headers: { authorization: `Bearer ${ADMIN}` },
+    });
+
     await worker.scheduled({ scheduledTime: Date.now() }, env);
-    const served = (await send(env, "GET", "/v1/sites/books")).body.operations.map((o: { hash: string }) => o.hash);
-    assert.deepEqual(served, [fresh]);
+    const status = (hash: string) =>
+      (raw.prepare("SELECT status FROM versions WHERE hash = ?").get(hash) as { status: string }).status;
+    assert.equal(status(live[0].hash), "archived", "replaced by a newer live version");
+    assert.equal(status(heal), "live");
+    assert.equal(status(live[1].hash), "live", "a live version never times out");
+    assert.equal(status(staleCandidate), "archived");
+    assert.equal(status(staleDegraded), "archived");
+    assert.equal(status(freshCandidate), "candidate");
+
     await worker.scheduled({ scheduledTime: Date.now() + 31 * 86_400_000 }, env);
-    assert.equal((await send(env, "GET", "/v1/sites/books")).status, 404);
+    assert.equal(status(freshCandidate), "archived");
+    assert.equal(status(live[1].hash), "live");
   });
 });
 

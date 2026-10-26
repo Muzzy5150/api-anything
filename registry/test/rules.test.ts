@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { prefixOf } from "../src/auth.js";
-import { byRank, degraded, type Facts, nextStatus, promoted, thresholds } from "../src/rules.js";
+import { byRank, degraded, type Facts, nextStatus, promoted, thresholds, toArchive } from "../src/rules.js";
 
 const t = thresholds({});
 const facts = (f: Partial<Facts> = {}): Facts => ({
@@ -68,4 +68,36 @@ test("an IP's network is its /24 or /48", () => {
   assert.equal(prefixOf("2001:db8:abcd:12::1"), "2001:db8:abcd");
   assert.equal(prefixOf("2001:db8::1"), "2001:db8:0");
   assert.equal(prefixOf(""), "unknown");
+});
+
+test("archive: stale candidates and degraded versions, and what a newer live version replaced; never a live one by age", () => {
+  const v = (
+    op: string,
+    status: "live" | "candidate" | "degraded" | "review",
+    createdAt: string,
+    lastOkAt?: string,
+  ) => ({
+    site: "s",
+    op,
+    status,
+    createdAt,
+    ...(lastOkAt ? { lastOkAt } : {}),
+  });
+  const versions = [
+    v("a", "live", "2026-01-01"),
+    v("b", "live", "2026-01-01"),
+    v("b", "live", "2026-03-01"),
+    v("b", "candidate", "2026-04-01"),
+    v("c", "candidate", "2026-01-01", "2026-05-01"),
+    v("c", "degraded", "2026-01-01"),
+    v("d", "review", "2026-01-01"),
+  ];
+  assert.deepEqual(
+    toArchive(versions, "2026-04-15").map((x) => [x.op, x.status, x.createdAt]),
+    [
+      ["b", "live", "2026-01-01"],
+      ["b", "candidate", "2026-04-01"],
+      ["c", "degraded", "2026-01-01"],
+    ],
+  );
 });

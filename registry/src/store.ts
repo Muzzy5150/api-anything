@@ -1,7 +1,7 @@
 /** The registry's SQL over D1. Only the D1 surface below is used, so a test can stand in for it (test/d1.ts). */
 import type { Evidence, Outcome, SiteContext, Status } from "../../src/registry-api.js";
 import type { Operation } from "../../src/spec.js";
-import { ABOUT_OP, type Facts, SERVED } from "./rules.js";
+import { ABOUT_OP, type Archivable, type Facts, SERVED } from "./rules.js";
 
 export interface D1Statement {
   bind(...values: unknown[]): D1Statement;
@@ -276,24 +276,31 @@ export const touchKey = (db: D1Database, key: string, now: string, uploads: numb
     .bind(key, now, uploads, reports)
     .run();
 
-/**
- * Archives every served version with no ok in the window and nothing done to it there either (a seed, a
- * maintainer's or the reports' status change), and drops spent rate counters. Answers how many it archived.
- */
-export async function archive(db: D1Database, cutoff: string, now: string, hour: number): Promise<number> {
-  const stale = (
+/** Every version that could still be served, with what the archive decision reads. */
+export async function archiveCandidates(db: D1Database): Promise<(Archivable & { hash: string })[]> {
+  const rows = (
     await db
       .prepare(
-        `SELECT hash FROM versions WHERE status IN (${SERVED.map(() => "?").join(", ")}) AND COALESCE(last_ok_at, created_at) < ? AND updated_at < ?`,
+        `SELECT hash, site, op_name, status, created_at, last_ok_at FROM versions WHERE status IN (${SERVED.map(() => "?").join(", ")})`,
       )
-      .bind(...SERVED, cutoff, cutoff)
-      .all<{ hash: string }>()
+      .bind(...SERVED)
+      .all<Pick<VersionRow, "hash" | "site" | "op_name" | "status" | "created_at" | "last_ok_at">>()
   ).results;
-  await db.batch([
-    ...stale.map((r) =>
-      db.prepare("UPDATE versions SET status = 'archived', updated_at = ? WHERE hash = ?").bind(now, r.hash),
+  return rows.map((r) => ({
+    hash: r.hash,
+    site: r.site,
+    op: r.op_name,
+    status: r.status,
+    createdAt: r.created_at,
+    ...(r.last_ok_at ? { lastOkAt: r.last_ok_at } : {}),
+  }));
+}
+
+/** Archives the given versions and drops spent rate counters. */
+export const archive = (db: D1Database, hashes: string[], now: string, hour: number) =>
+  db.batch([
+    ...hashes.map((h) =>
+      db.prepare("UPDATE versions SET status = 'archived', updated_at = ? WHERE hash = ?").bind(now, h),
     ),
     db.prepare("DELETE FROM rates WHERE hour < ?").bind(hour - 24),
   ]);
-  return stale.length;
-}

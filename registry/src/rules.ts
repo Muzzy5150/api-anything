@@ -102,5 +102,32 @@ export function byRank(a: Rankable, b: Rankable): number {
   );
 }
 
+export interface Archivable {
+  site: string;
+  op: string;
+  status: Status;
+  createdAt: string;
+  /** the last ok from an install other than the uploader */
+  lastOkAt?: string;
+}
+
+/**
+ * The versions the daily job archives: a candidate or a degraded version with no ok since `cutoff`, and any
+ * version older than a live version of the same op, which replaced it. A live version never times out: it
+ * leaves live only by degrading.
+ */
+export function toArchive<V extends Archivable>(versions: V[], cutoff: string): V[] {
+  const newestLive = new Map<string, string>();
+  for (const v of versions) {
+    const op = `${v.site}\n${v.op}`;
+    if (v.status === "live" && v.createdAt > (newestLive.get(op) ?? "")) newestLive.set(op, v.createdAt);
+  }
+  return versions.filter((v) => {
+    const replaced = v.createdAt < (newestLive.get(`${v.site}\n${v.op}`) ?? "");
+    const stale = (v.status === "candidate" || v.status === "degraded") && (v.lastOkAt ?? v.createdAt) < cutoff;
+    return SERVED.includes(v.status) && (replaced || stale);
+  });
+}
+
 /** The statuses ever served to someone other than the uploader. */
 export const SERVED: readonly Status[] = ["live", "candidate", "degraded"];
