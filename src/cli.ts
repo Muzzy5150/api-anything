@@ -984,8 +984,8 @@ async function cmdSearch({ pos }: Parsed): Promise<number> {
     next: !top
       ? "nobody shared one yet: learn it with api-anything capture and add, then share it with api-anything publish"
       : top.installed
-        ? `api-anything ops ${top.site} lists its operations`
-        : `api-anything pull ${top.site} fetches it; read its warnings with the user before the first call`,
+        ? `check that ${top.domain} is the site meant, then api-anything ops ${top.site} lists its operations`
+        : `check that ${top.domain} is the site meant (a lookalike name can point elsewhere), then api-anything pull ${top.site} fetches it; read its warnings with the user before the first call`,
   });
   return 0;
 }
@@ -1035,6 +1035,7 @@ async function cmdPublish({ v, pos }: Parsed): Promise<number> {
     out({
       ok: true,
       site: p.site,
+      ...(p.as ? { as: `${p.as}: the registry names a new site after its domain, so it goes up under that name` } : {}),
       uploads: p.ops.map((o) => o.upload),
       operations: p.operations,
       stripped: p.stripped,

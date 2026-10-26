@@ -19,6 +19,8 @@ export interface ShareOutcome {
   op: string;
   /** uploaded (or already there, counted as a confirmation) */
   shared: boolean;
+  /** the name it goes up under in the registry, when that is not `site` (publish.ts `registryName`) */
+  as?: string;
   status?: Status;
   hash?: string;
   /** why it was not shared: sharing off in settings, a login or write op without consent, refused */
@@ -50,7 +52,12 @@ export async function shareOps(
   const share = loadSettings().share;
   const out: ShareOutcome[] = [];
   for (const op of p.ops) {
-    const base = { site: p.site, op: op.op, ...(op.personal.length ? { personal: op.personal } : {}) };
+    const base = {
+      site: p.site,
+      op: op.op,
+      ...(p.as ? { as: p.as } : {}),
+      ...(op.personal.length ? { personal: op.personal } : {}),
+    };
     if (op.errors.length) {
       out.push({ ...base, shared: false, reason: `refused: ${op.errors.join("; ")}` });
       continue;

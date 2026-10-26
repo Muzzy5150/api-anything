@@ -15,6 +15,7 @@ import { cleanCall } from "../src/clean.js";
 import { call } from "../src/execute.js";
 import { resolver } from "../src/http.js";
 import { ensureKey, saveSettings, signedHeaders } from "../src/identity.js";
+import { registryName } from "../src/publish.js";
 import { settle } from "../src/report.js";
 import { mergeCapture, saveSession } from "../src/session.js";
 import { HOLDOUT_PURPOSE, shareOps } from "../src/share.js";
@@ -82,9 +83,17 @@ test("shareOps: a public read goes automatically, signed, and the local op recor
   shareOn();
   saveSite(site());
   const [out] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
-  assert.deepEqual(out, { site: "demo", op: "search", shared: true, hash: out!.hash, status: "candidate" });
+  // a site learned here goes up under the name the registry gives a new site: its domain, dots as dashes
+  assert.deepEqual(out, {
+    site: "demo",
+    as: "example-com",
+    op: "search",
+    shared: true,
+    hash: out!.hash,
+    status: "candidate",
+  });
   const [u] = fake.uploads();
-  assert.equal(out!.hash, hashOf("demo", u!.operation), "the hash is the service's, over the op as sent");
+  assert.equal(out!.hash, hashOf("example-com", u!.operation), "the hash is the service's, over the op as sent");
   assert.deepEqual(u!.evidence, {
     clientVersion: u!.evidence.clientVersion,
     learnedLoggedIn: false,
@@ -93,7 +102,7 @@ test("shareOps: a public read goes automatically, signed, and the local op recor
   assert.match(u!.evidence.clientVersion, /^\d+\.\d+\.\d+/);
   assert.deepEqual(
     { name: u!.site.name, domain: u!.site.domain, baseUrl: u!.site.baseUrl },
-    { name: "demo", domain: "example.com", baseUrl: "https://www.example.com" },
+    { name: "example-com", domain: "example.com", baseUrl: "https://www.example.com" },
   );
   assert.equal(u!.operation.params[0]!.example, "puppies");
   assert.equal(u!.operation.response.shape, undefined);
@@ -199,7 +208,7 @@ test("shareOps: anything that is not a public read waits for the user's yes", as
 test("shareOps with sharing off sends nothing on its own; consent still sends", async () => {
   saveSite(site());
   const [off] = await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } });
-  assert.deepEqual(off, { site: "demo", op: "search", shared: false, reason: off!.reason });
+  assert.deepEqual(off, { site: "demo", as: "example-com", op: "search", shared: false, reason: off!.reason });
   assert.match(off!.reason!, /sharing is off/);
   shareOn(false);
   assert.equal((await shareOps("demo", ["search"], { evidence: { cleanReplay: "ok" } }))[0]!.shared, false);
@@ -452,7 +461,7 @@ test("a call that heals a registry version reports it failed, and shares the hea
   assert.match(u!.operation.request.url, new RegExp(`/api/${NEW}/search`));
   assert.equal(cookies.at(-1), null, "the clean replay sent no cookie");
   const op = loadSite("demo")!.site.operations[0]!;
-  assert.deepEqual(op.version, { hash: hashOf("demo", u!.operation), status: "candidate" });
+  assert.deepEqual(op.version, { hash: hashOf("example-com", u!.operation), status: "candidate" });
 });
 
 test("a heal of a version that is not public is not shared back, and the healed op is no longer that version", async () => {
@@ -707,4 +716,17 @@ test("cleanCall with publicOnly refuses a redirect into the network, and a host 
     { site: "demo", fetchImpl: to("http://127.0.0.1:9/api"), minIntervalMs: 0 },
   );
   assert.equal(own.class, "ok");
+});
+
+test("registryName: a site the registry holds keeps its name; any other goes up under its domain's slug", () => {
+  assert.equal(registryName(site({}, { name: "demo" })), "example-com");
+  assert.equal(registryName(site({}, { name: "anything", baseUrl: "https://search.lobste.rs" })), "lobste-rs");
+  assert.equal(registryName(site({}, { name: "example-com" })), "example-com");
+  const pulled = site({}, { name: "news", shared: { from: "https://registry/v1/sites/news", sha256: "0".repeat(64) } });
+  assert.equal(registryName(pulled), "news", "pulled: bound to that name already");
+  assert.equal(
+    registryName(site({}, { name: "hacker-news", baseUrl: "https://news.ycombinator.com" })),
+    "hacker-news",
+    "bundled: the registry was seeded with it",
+  );
 });

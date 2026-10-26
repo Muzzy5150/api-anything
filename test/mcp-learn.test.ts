@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { badSiteName, hooks, learnSite } from "../src/learnsite.js";
+import { hooks, learnSite } from "../src/learnsite.js";
 import { createServer } from "../src/mcp.js";
 import { learnTool } from "../src/mcp-learn.js";
 import { HOLDOUT_PURPOSE } from "../src/share.js";
@@ -168,6 +168,20 @@ test("learn_site refuses a GraphQL mutation, a POST or a PUT as a read, picked o
       ["a GraphQL mutation, automatic", mutation, {}],
       ["a JSON POST", { method: "POST", path: "/api/cart", body: '{"q":"{q}"}', answer: items }, {}],
       ["a PUT", { method: "PUT", path: "/api/cart?q={q}", answer: items }, { pickRequest: 2 }],
+      [
+        "a persisted GraphQL query, by its hash only",
+        {
+          method: "POST",
+          path: "/graphql",
+          body: JSON.stringify({
+            operationName: "AddToCart",
+            variables: { q: "{q}" },
+            extensions: { persistedQuery: { version: 1, sha256Hash: "9f2c" } },
+          }),
+          answer: { data: { addToCart: items } },
+        },
+        { pickRequest: 2, extract: "data.addToCart.items" },
+      ],
     ];
     for (const [n, [what, request, choice]] of writes.entries()) {
       const r = await learnSite(
@@ -298,6 +312,23 @@ test("notARead: GET, HEAD and a GraphQL query sent as POST read; a mutation, oth
     /a POST that is not a GraphQL query/,
   );
   assert.match(notARead(op("DELETE", "https://a.example.com/api/x"))!, /a DELETE/);
+  // a persisted query names its document by a hash: it could be a mutation
+  const persisted = JSON.stringify({
+    operationName: "Q",
+    variables: {},
+    extensions: { persistedQuery: { sha256Hash: "ab" } },
+  });
+  assert.match(notARead(op("POST", "https://a.example.com/graphql", persisted))!, /no query document/);
+  assert.match(
+    notARead(op("POST", "https://a.example.com/graphql", JSON.stringify([JSON.parse(query), JSON.parse(persisted)])))!,
+    /no query document/,
+    "a batch with one persisted item",
+  );
+  assert.match(notARead(op("POST", "https://a.example.com/graphql", "operationName=Q&id=12"))!, /no query document/);
+  assert.equal(
+    notARead(op("GET", `https://a.example.com/graphql?extensions=${encodeURIComponent(persisted)}`)),
+    undefined,
+  );
   assert.match(
     notARead(op("POST", "https://a.example.com/graphql", query, [{ param: "body", at: ["body"] }]))!,
     /whole body/,
@@ -345,18 +376,8 @@ test("MCP learn_site loads only https pages on a public host; the CLI's learn ta
   assert.match(r.error ?? "", /no capture "none-1"/);
 });
 
-test("a new site's name starts with the first label of its domain, as the registry requires", async () => {
+test("a new site is named as the registry names it: its registrable domain with dots as dashes", async () => {
   process.env.API_ANYTHING_HOME = mkdtempSync(join(tmpdir(), "aa-learn-name-"));
-  assert.equal(badSiteName("crates", "https://crates.io/search?q={q}"), undefined);
-  assert.equal(badSiteName("crates-io", "https://crates.io/search?q={q}"), undefined);
-  assert.equal(badSiteName("lobsters", "https://lobste.rs/s?q={q}"), undefined);
-  assert.match(badSiteName("rust", "https://crates.io/search?q={q}")!, /does not start with "crates"/);
-  assert.equal(
-    badSiteName("anything", "http://127.0.0.1:1/s"),
-    undefined,
-    "a local trigger never goes to the registry",
-  );
-
   const learn = (trigger: string, site?: string) =>
     learnSite({
       trigger,
@@ -366,15 +387,14 @@ test("a new site's name starts with the first label of its domain, as the regist
       args3: { q: "ccc" },
       captures: ["none-1", "none-2"],
     });
-  const bad = await learn("https://crates.io/search?q={q}", "rust");
-  assert.equal(bad.ok, false);
-  assert.match(
-    bad.error ?? "",
-    /site name "rust" does not start with "crates", the first label of its domain crates\.io/,
+  assert.equal((await learn("https://www.crates.io/search?q={q}")).site, "crates-io");
+  assert.equal((await learn("https://search.lobste.rs/s?q={q}")).site, "lobste-rs");
+  assert.equal(
+    (await learn("https://news.ycombinator.com/s?q={q}")).site,
+    "hacker-news",
+    "a site this machine has on that host",
   );
-  assert.match(bad.next ?? "", /starts with "crates"/);
-  // the default: the host, unless it does not start with the domain's first label; then the domain
-  assert.equal((await learn("https://www.crates.io/search?q={q}")).site, "crates.io");
-  assert.equal((await learn("https://search.lobste.rs/s?q={q}")).site, "lobste.rs");
-  assert.equal((await learn("https://docs.rs/s?q={q}")).site, "docs.rs");
+  assert.equal((await learn("https://docs.example.co.uk/s?q={q}")).site, "example-co-uk");
+  // a name the user gives is theirs: shareOps uploads it under the registry's name
+  assert.equal((await learn("https://crates.io/search?q={q}", "rust")).site, "rust");
 });

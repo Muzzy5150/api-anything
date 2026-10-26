@@ -3,14 +3,16 @@
  * param examples kept), a live-secret scan no `public` name waives, the shared rules, and what may be
  * the publisher's own, for them to look at. `api-anything publish` previews it; share.ts sends it.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type Gate, gate } from "./checks.js";
+import { slugOf } from "./domain.js";
 import type { Evidence, SiteContext, VersionUpload } from "./registry-api.js";
 import { hostsOf, summarize } from "./search.js";
 import { besideOrigins, credentialsOf, ipIn, opUrls, scanSecrets } from "./secrets.js";
 import { loadSession, safeName, siteOf } from "./session.js";
 import type { Operation, Site } from "./spec.js";
-import { exportSite, loadSite, siteNotes } from "./store.js";
+import { BUNDLED_DIR, exportSite, loadSite, siteNotes } from "./store.js";
 import { LIMITS, vetShared } from "./vet.js";
 
 export const CLIENT_VERSION = (
@@ -98,6 +100,17 @@ export function isPublic(site: Site, op: Operation, evidence: Partial<Evidence>)
   );
 }
 
+/**
+ * The name a site goes up under. A name the registry already holds stays: a pulled site's, and a bundled
+ * one's, which the registry was seeded with. Any other site is new there, and the registry names a new
+ * site after its domain (`slugOf`), so it goes up under that whatever it is called here; the local name
+ * is the user's.
+ */
+export function registryName(site: Site, bundledDir = BUNDLED_DIR): string {
+  if (site.shared || existsSync(join(bundledDir, `${site.name}.json`))) return site.name;
+  return slugOf(new URL(site.baseUrl).hostname);
+}
+
 export interface OpPlan {
   op: string;
   upload: VersionUpload;
@@ -109,6 +122,8 @@ export interface OpPlan {
 
 export interface Plan {
   site: string;
+  /** the site's name in the registry, when it is not `site` (`registryName`) */
+  as?: string;
   ops: OpPlan[];
   operations: ReturnType<typeof summarize>[];
   stripped: string[];
@@ -142,8 +157,9 @@ export function plan(
   const live = credentialsOf(
     besideOrigins(loadSession(name), [ex.spec.baseUrl, ...ex.spec.operations.flatMap(opUrls)]),
   );
+  const as = registryName(r.site);
   const context: SiteContext = {
-    name,
+    name: as,
     domain: siteOf(new URL(ex.spec.baseUrl).hostname),
     baseUrl: ex.spec.baseUrl,
     ...(ex.spec.displayName ? { displayName: ex.spec.displayName } : {}),
@@ -187,6 +203,7 @@ export function plan(
   const checked = gate({ ...r.site, operations: r.site.operations.filter((op) => wanted.includes(op.name)) });
   return {
     site: name,
+    ...(as !== name ? { as } : {}),
     ops,
     operations: ops.map((p) => summarize(p.upload.operation)),
     stripped: [

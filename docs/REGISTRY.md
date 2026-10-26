@@ -31,7 +31,10 @@ web server does, and does not store it.
 ## Using an operation that exists
 
 1. The agent calls MCP `find_sites` (words, a domain or a URL). The registry's `GET /v1/search`
-   answers with each match's operations, their params and status, so the agent can call one next.
+   answers with each match's operations, their params and status, so the agent can call one next. Every
+   match, local or the registry's, shows its `domain`, and the tool's description, its `next` and the
+   skill tell the agent to check that domain is the site the user means: a site's name and description
+   are the uploader's words, and can imitate another site.
    Anyone can upload a site that calls itself Amazon, so search trusts only what other installs
    confirmed:
    - a site with a live op always ranks above a site with only candidates, whatever the score;
@@ -41,7 +44,10 @@ web server does, and does not store it.
      (`/sites/:name`) still renders, marked `noindex`.
 2. `call_operation` on a site that is not installed fetches it (`GET /v1/sites/:name`) first. Of a
    site fetched this way only the reads run until a human runs `api-anything pull` (the `by: "agent"`
-   mark, as before). The call runs on the user's machine: plain HTTP first, the browser if it must.
+   mark, as before). An op of a fetched or pulled site that is still a `candidate` is called with none of
+   the user's cookies or session values, at plain HTTP and in the browser's page fetch: by the review
+   rules a candidate is a public read and needs none, and a GET with the user's cookies can still act on
+   their account. The call runs on the user's machine: plain HTTP first, the browser if it must.
 3. After the call, a report (`POST /v1/reports`): version hash, outcome, tier, ms. No args, no data.
    Reports are batched, sent in the background, and dropped when the registry cannot be reached. Each
    is signed by the install's key and stored with it and the time it arrived: the key is anonymous, but
@@ -60,8 +66,9 @@ web server does, and does not store it.
      a bot wall answering (Anubis, Cloudflare): the data is public behind it, and each caller's browser
      tier passes it.
    Before the holdout call sends anything, `learn_site` refuses a request that is no read: a method other
-   than GET or HEAD unless it is a GraphQL query sent as POST, a GraphQL mutation, or a param that is the
-   whole body or the document. Over MCP the trigger must be an https page on a public host.
+   than GET or HEAD unless it is a GraphQL query sent as POST, a GraphQL mutation, a GraphQL POST that
+   carries no query document (a persisted query, named by a hash or an id), or a param that is the whole
+   body or the document. Over MCP the trigger must be an https page on a public host.
 4. `shareOps` uploads it (`POST /v1/versions`, signed). A public read goes automatically when
    `share` is on. A login op or a write is uploaded only with the user's yes (CLI prompt, or MCP
    elicitation where the client supports it); the prompt lists what in the upload may be the user's own
@@ -70,9 +77,12 @@ web server does, and does not store it.
    learn_site's holdout and none of the user's own `<site>.md` notes: a check recorded with
    `api-anything check`, or notes the user wrote, go only with their yes (`publish --yes`). A pulled
    site's notes came from the registry and go back with its heal.
-5. A new site's name is its registrable domain with dots turned into dashes: `crates-io` for crates.io,
-   `lobste-rs` for lobste.rs (Trust, below). A site already shared under another name (a seed's
-   `goodreads`) keeps that name.
+5. A new site's name is its registrable domain with dots as dashes (`crates-io` for crates.io,
+   `lobste-rs` for lobste.rs; Trust, below). `learn_site` names a new site that way, unless this machine already has a
+   site on that host. A local site under another name (one the user gave, or one learned before) goes up
+   under that slug: `shareOps` uploads a site that is neither pulled nor bundled under its domain's slug,
+   and says so in the outcome's `as` (`publish.ts` `registryName`). A pulled or bundled site keeps its
+   name, which the registry already holds.
 
 ## Verification by the crowd
 
