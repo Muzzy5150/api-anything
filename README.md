@@ -71,21 +71,29 @@ builds the request template without an LLM.
 
 ## Sharing
 
+Whether sharing is on or off, a search goes to the catalog: the words, domain or URL your agent passes
+to `find_sites`, and the name of a shared site it calls before this machine has it.
+
 With sharing on, this is what leaves your machine:
 
 - **Operations learned from public pages.** An operation is shared automatically only when it is a
   read, it was learned signed out, and the replay with no cookies answered (with the data, or with
   a bot wall such as Anubis or Cloudflare, which each caller's browser passes on its own). Its stored example is the
-  agent's second value and its check is the third, never what you asked. Cookies and tokens are
+  agent's second value and its check is the third, never the value you asked for. Cookies and tokens are
   references in an operation (`cookie:name`), never their values, and a spec holding a live
-  credential is refused before it is saved.
-- **An operation that needed your login** is shared only after you say yes. The agent asks you
-  (through the MCP client's prompt where it supports one), and the command it runs is
+  credential is refused before it is saved. Checks you recorded with `api-anything check` and notes
+  you wrote in `<site>.md` are not sent without your yes.
+- **An operation that needed your login**, or one that may hold something of yours (an email address,
+  an id, a value typed into the page), is shared only after you say yes. The agent asks you (through the
+  MCP client's prompt where it supports one), shows you what it found, and the command it runs is
   `api-anything publish <site> <op> --yes`.
 - **Reports.** After a call: which version of the operation ran, the outcome, the transport tier
-  and the time. No arguments and no data.
+  and the time. No arguments and no data. Each report is signed by your install's anonymous key, so
+  the catalog can tell that the same install sent it, and when.
 - **Background checks.** An idle MCP server calls a few new operations a day (at most 20) with their
-  published examples, over plain HTTP with no cookies, and reports the outcome.
+  published examples, over plain HTTP with no cookies, and reports the outcome. These calls go from
+  your machine and IP address to sites other people's agents shared, and only to https addresses on
+  public hosts.
 - **Repairs.** When a call heals a public operation that drifted, the repaired version is shared.
 
 A new operation is a candidate until installs other than its uploader report it working from

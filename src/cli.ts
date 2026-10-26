@@ -1020,7 +1020,8 @@ async function cmdPublish({ v, pos }: Parsed): Promise<number> {
   const again = `api-anything publish ${[site.name, ...ops].join(" ")}`;
   let p: ReturnType<typeof plan>;
   try {
-    p = plan(site.name, { ops });
+    // the preview shows what --yes sends: with the user's yes, their notes go too
+    p = plan(site.name, { ops, consent: true });
   } catch (e) {
     throw new Fail(oneLine((e as Error).message), `api-anything ops ${site.name}`);
   }

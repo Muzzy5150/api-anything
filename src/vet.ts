@@ -79,7 +79,7 @@ function regexes(op: Operation): [string, string][] {
  * a `query` that reads as a document. Algolia's `query` is a search string, and `{query}` the
  * placeholder of a param named query, not a document asking for one field.
  */
-function isGraphql(op: Operation): boolean {
+function isGraphql(op: Pick<Operation, "request" | "params">): boolean {
   let path = "";
   try {
     path = new URL(op.request.url).pathname;
@@ -169,6 +169,32 @@ const hostOf = (url: string) => {
   }
 };
 
+/**
+ * Where the args go: the last step of each slot an arg reaches. An arg that is, or is spliced into,
+ * the body or the document could make it any request. An arg reaches a param's own slot, and any slot
+ * whose template has a hole that is no ref: a ref slot's template is filled from the args too.
+ */
+const argSlots = (op: Pick<Operation, "slots">) =>
+  op.slots.filter((sl) => sl.param !== undefined || argHoles(sl.template ?? "").length > 0).map((sl) => sl.at.at(-1)!);
+
+/**
+ * Why learn_site may not save this request as a read, or undefined when it may. The read rules of
+ * vetShared, with a stricter method: learn_site sends what it saves (a holdout call, a clean replay)
+ * and shares it without asking, so only a GET, a HEAD or a GraphQL query sent as POST is a read there.
+ * With no slots (a captured request not yet learned) the rules about params find nothing.
+ */
+export function notARead(op: Pick<Operation, "request" | "slots" | "params">): string | undefined {
+  const method = op.request.method.toUpperCase();
+  const graphql = isGraphql(op);
+  if (graphqlDocuments(op.request).some(writesGraphql)) return "it is a GraphQL mutation";
+  if (method !== "GET" && method !== "HEAD" && !(method === "POST" && graphql))
+    return `a ${method} that is not a GraphQL query may change something`;
+  const param = argSlots(op);
+  if (param.some((st) => WHOLE_BODY.test(st))) return "a param is its whole body";
+  if (graphql && param.some((st) => DOCUMENT_AT.test(st))) return "a param fills its GraphQL document";
+  return undefined;
+}
+
 export function vetShared(site: Site, notes?: string): Vetted {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -230,12 +256,7 @@ export function vetShared(site: Site, notes?: string): Vetted {
     if (op.readOnly && !READ_METHODS.has(method)) errors.push(at(`a ${method} request cannot be a read`));
     if (op.readOnly && graphqlDocuments(op.request).some(writesGraphql))
       errors.push(at("a GraphQL mutation cannot be a read"));
-    // an arg that is, or is spliced into, the body or the document could make it any request
-    // an arg reaches a param's own slot, and any slot whose template has a hole that is no ref: a ref
-    // slot's template is filled from the args too
-    const param = op.slots
-      .filter((sl) => sl.param !== undefined || argHoles(sl.template ?? "").length > 0)
-      .map((sl) => sl.at.at(-1)!);
+    const param = argSlots(op);
     if (op.readOnly && param.some((st) => WHOLE_BODY.test(st))) errors.push(at("a read whose whole body a param is"));
     else if (op.readOnly && param.some((st) => DOCUMENT_AT.test(st)) && isGraphql(op))
       errors.push(at("a read whose GraphQL document a param fills"));

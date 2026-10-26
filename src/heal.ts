@@ -42,6 +42,7 @@ import {
 import type { Match, Operation, Param, ResponseSpec, Site, Slot, Trigger, Volatile } from "./spec.js";
 import { appendHeal, clearStale, loadSite, rememberTier, updateSite } from "./store.js";
 import type { CaptureResult, Exchange, TriggerStep } from "./types.js";
+import { notARead } from "./vet.js";
 
 export const profileDir = () => join(home(), "profile");
 
@@ -473,7 +474,12 @@ export interface AddInput {
   /** by param name: the values it allows, set on top of what the op had */
   allowed?: Record<string, Pick<Param, "enum" | "min" | "max">>;
   fetchImpl?: typeof fetch;
+  /** learn_site's: refuse (`NotARead`) a learned request `notARead` refuses, before anything is sent or saved */
+  readsOnly?: boolean;
 }
+
+/** A request learn_site may not save as a read (`notARead`): nothing was sent and nothing saved. */
+export class NotARead extends Error {}
 
 /** What a param says about its values that no capture tells, kept when its op is learned again. */
 const KEPT = ["description", "pattern", "hint", "enum", "min", "max"] as const;
@@ -851,6 +857,11 @@ export async function addOperation(input: AddInput): Promise<AddResult> {
   if (!i.write && learned.exchange2?.aborted && i.from2?.write)
     throw new Error(
       `capture ${i.from2.id} was made with --write and intercepted request ${learned.exchange2.id} as a write: learning it needs --write`,
+    );
+  const notRead = i.readsOnly && !i.write ? notARead(learned.operation) : undefined;
+  if (notRead)
+    throw new NotARead(
+      `request ${learned.exchange.id} (${learned.operation.request.method} ${learned.operation.request.url.split("?")[0]}) is not a read: ${notRead}`,
     );
   const warnings = recipeWarnings(learned.warnings, r);
   if (missing.length)

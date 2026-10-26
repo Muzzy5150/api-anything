@@ -19,6 +19,7 @@ import {
   fillTrigger,
   loadCapture,
   loginWall,
+  NotARead,
   PROFILE_HINT,
 } from "./heal.js";
 import { buildRequest } from "./http.js";
@@ -27,11 +28,12 @@ import { resolveLoginTarget } from "./login.js";
 import { outline } from "./outline.js";
 import type { Evidence } from "./registry-api.js";
 import { summarize } from "./search.js";
-import { safeName } from "./session.js";
-import { type ShareOutcome, shareOps } from "./share.js";
+import { safeName, siteOf } from "./session.js";
+import { HOLDOUT_PURPOSE, type ShareOutcome, shareOps } from "./share.js";
 import { CheckSchema, type Operation } from "./spec.js";
 import { loadSite, updateSite } from "./store.js";
 import type { Exchange } from "./types.js";
+import { badAddress, notARead } from "./vet.js";
 
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
   .version;
@@ -187,6 +189,37 @@ function revealed(op: Operation, args: Args): string[] {
     .map(([k]) => k);
 }
 
+/**
+ * The registry binds a new site's name only when it starts with the first label of the site's
+ * registrable domain (crates.io: crates, crates-io, crates.io). Undefined when `name` does, or when
+ * the trigger is no address the registry takes (localhost, http) and the name never goes there.
+ */
+export function badSiteName(name: string, trigger: string): string | undefined {
+  if (badAddress(trigger)) return undefined;
+  const domain = siteOf(new URL(trigger).hostname);
+  const label = domain.split(".")[0]!;
+  return name.startsWith(label)
+    ? undefined
+    : `site name "${name}" does not start with "${label}", the first label of its domain ${domain}: the registry refuses a new site named otherwise`;
+}
+
+/**
+ * A new site's default name: its host without www., or its registrable domain when the host does not
+ * start with that domain's first label (news.ycombinator.com: ycombinator.com). A known site keeps its own.
+ */
+function defaultSiteName(trigger: string): string {
+  const found = resolveLoginTarget(trigger).site;
+  if (loadSite(found) || !badSiteName(found, trigger)) return found;
+  return safeName(siteOf(new URL(trigger).hostname));
+}
+
+/** A captured request as an op with no slots yet, for `notARead`. */
+const asRequest = (e: Exchange) => ({
+  request: { method: e.request.method, url: e.request.url, headers: e.request.headers, body: e.request.body },
+  slots: [],
+  params: [],
+});
+
 function checkArgs(input: LearnSiteInput): string | undefined {
   const keys = (a: Args) => Object.keys(a).sort().join(",");
   if (!Object.keys(input.args ?? {}).length)
@@ -223,10 +256,19 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
 
   let site: string;
   try {
-    site = input.site ? safeName(input.site) : resolveLoginTarget(input.trigger).site;
+    site = input.site ? safeName(input.site) : defaultSiteName(input.trigger);
   } catch (e) {
     return { ok: false, error: (e as Error).message, next: "pass site: a short name (letters, digits, . _ -)" };
   }
+  // a site this machine has is bound already, whatever its name; a new one must be one the registry takes
+  const badName = loadSite(site) ? undefined : badSiteName(site, input.trigger);
+  if (badName)
+    return {
+      ok: false,
+      error: badName,
+      next: `pass a site name that starts with "${siteOf(new URL(input.trigger).hostname).split(".")[0]}", or leave site out`,
+      nextCall: { action: "fix_args" },
+    };
   const existing = loadSite(site)?.site;
   let op = input.op ?? opName(input.trigger, input.args);
   if (!input.op)
@@ -276,6 +318,7 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
   const values = Object.values(input.args).map(asText);
   const ranked = rankCandidates(c1.exchanges, input.args, { pages: pageUrls(c1.exchanges, capturePages(c1)) });
   const exchange = (id: number) => c1.exchanges.find((e) => e.id === id);
+  const refusal = (id: number) => notARead(asRequest(exchange(id)!));
   const options: Choice[] = ranked.slice(0, 6).map((c) => ({
     request: c.id,
     method: c.method,
@@ -306,8 +349,13 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
       url: clip(e.request.url),
       ...suggest(e, [], values),
     };
-  } else if (told) chosen = options.find((x) => resolves(given, exchange(x.request)?.response?.body)) ?? options[0];
-  else chosen = options.find((x) => x.recipe);
+  } else {
+    // a request that is no read is picked only when nothing else would do, and then refused below
+    const reads = [...options.filter((x) => !refusal(x.request)), ...options.filter((x) => refusal(x.request))];
+    chosen = told
+      ? (reads.find((x) => resolves(given, exchange(x.request)?.response?.body)) ?? reads[0])
+      : reads.find((x) => x.recipe);
+  }
   const page = c1.exchanges.filter((e) => e.resourceType === "document" && e.response).at(-1)?.response;
   const wall = page && botWall({ status: page.status, headers: page.headers, body: page.body ?? "" });
   if (!chosen && wall)
@@ -331,6 +379,17 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
   const recipe = told ? given : (chosen.recipe ?? {});
   const alternatives = options.filter((x) => x.request !== chosen.request).slice(0, 5);
   const shown = { ...chosen, recipe, auto: input.pickRequest === undefined && !told };
+  // Before anything is sent: a write saved as a read would be sent by the holdout call and the clean
+  // replay, and by every call after. The rules about params are asked again once it is learned.
+  const notRead = (why: string) =>
+    fail(
+      `${why}. learn_site learns reads only, and sent nothing`,
+      "pick a request from alternatives that reads; a write is learned with the CLI, which intercepts it: api-anything add <site> <op> --trigger <url> --example k=v --write, run by the user",
+      { class: "refused", chosen: shown, alternatives, captures, nextCall: { action: "relearn", site, op } },
+    );
+  const early = refusal(chosen.request);
+  if (early)
+    return notRead(`request ${chosen.request} (${chosen.method} ${chosen.url.split("?")[0]}) is not a read: ${early}`);
 
   // add, with the same functions, credential checks and refusals
   const warnings: string[] = [];
@@ -349,9 +408,11 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
       response: recipe,
       from: { capture: c1, id: chosen.request },
       from2: c2,
+      readsOnly: true,
     });
   } catch (e) {
     const m = (e as Error).message.split("\n")[0]!;
+    if (e instanceof NotARead) return notRead(m);
     const login = /api-anything login/.test(m);
     return fail(
       m,
@@ -402,7 +463,7 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
   const check = CheckSchema.safeParse({
     args: input.args3,
     expect: "result",
-    purpose: "a value used as neither example when it was learned",
+    purpose: HOLDOUT_PURPOSE,
   });
   if (held && check.success)
     updateSite(site, (cur) => ({
@@ -471,14 +532,15 @@ export async function learnSite(input: LearnSiteInput, o: LearnSiteOptions = {})
     };
     shared = await share();
     if (shared.needsConsent) {
+      const found = shared.personal?.length ? shared.personal : undefined;
       const yes = await o
         .consent?.(
-          `${site} ${op} ${shared.reason ? `(${shared.reason}) ` : ""}works. Share it with the api-anything catalog? Other people's agents get the request's shape and the example values ${JSON.stringify(input.args2)}, never your cookies, your session or what you asked.`,
+          `${site} ${op} ${shared.reason ? `(${shared.reason}) ` : ""}works. Share it with the api-anything catalog? Anyone can then fetch the request's shape and the example values ${JSON.stringify(input.args2)} and ${JSON.stringify(input.args3)}; your cookies and session values are never sent.${found ? ` Check first, it may hold something of yours: ${found.join("; ")}.` : ""}`,
         )
         .catch(() => undefined);
       if (yes) shared = await share(true);
       else if (yes === undefined)
-        next = `ask the user whether to share ${op} with the catalog (${shared.reason ?? "it needs their yes"}); only on their yes, run: api-anything publish ${site} ${op} --yes`;
+        next = `ask the user whether to share ${op} with the catalog (${shared.reason ?? "it needs their yes"})${found ? `, showing them what may be theirs: ${found.join("; ")}` : ""}; only on their yes, run: api-anything publish ${site} ${op} --yes`;
     }
   }
 

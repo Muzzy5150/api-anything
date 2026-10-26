@@ -74,8 +74,12 @@ export function loadSite(name: string, bundledDir = BUNDLED_DIR): Resolved | und
  * user's copy first. Every caller pays for them in tokens, so a `## Maintainer notes` heading ends them:
  * from there on the file is for people working on the spec.
  */
-export function siteNotes(name: string, bundledDir = BUNDLED_DIR): string | undefined {
-  for (const [dir] of specDirs(bundledDir)) {
+export function siteNotes(
+  name: string,
+  o: { bundledDir?: string; from?: Resolved["source"] } = {},
+): string | undefined {
+  for (const [dir, source] of specDirs(o.bundledDir ?? BUNDLED_DIR)) {
+    if (o.from && source !== o.from) continue;
     const text = notesAt(join(dir, `${safeName(name)}.md`));
     if (text === undefined) continue;
     const [forCallers] = text.split(/^## Maintainer notes\s*$/im);

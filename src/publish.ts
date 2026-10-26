@@ -125,7 +125,10 @@ export interface Plan {
  * The uploads of `ops` (all of the site's when empty), with the export's stripping and scans, the shared
  * rules, a live-secret scan no `public` name waives over the exact bytes sent, and the privacy checks.
  */
-export function plan(name: string, o: { ops?: string[]; evidence?: Partial<Evidence>; parent?: string } = {}): Plan {
+export function plan(
+  name: string,
+  o: { ops?: string[]; evidence?: Partial<Evidence>; parent?: string; consent?: boolean } = {},
+): Plan {
   name = safeName(name);
   const r = loadSite(name);
   if (!r) throw new Error(`no site "${name}"`);
@@ -134,7 +137,8 @@ export function plan(name: string, o: { ops?: string[]; evidence?: Partial<Evide
     if (!r.site.operations.some((op) => op.name === n)) throw new Error(`no operation "${n}" on ${name}`);
   // the learner arranges the param examples to be ones the user chose to share (learnsite.ts)
   const ex = exportSite(name, { keepExamples: true });
-  const notes = siteNotes(name);
+  // The user's own notes go only with their yes; without it, only notes that came from the registry
+  const notes = o.consent ? siteNotes(name) : siteNotes(name, { from: "registry" });
   const live = credentialsOf(
     besideOrigins(loadSession(name), [ex.spec.baseUrl, ...ex.spec.operations.flatMap(opUrls)]),
   );

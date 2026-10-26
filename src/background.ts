@@ -1,7 +1,9 @@
 /**
  * Background verification (docs/REGISTRY.md "Verification by the crowd"): an idle MCP server asks the
  * registry for candidates this install has not reported, calls each with its published args over plain
- * HTTP with no cookies and no session values (clean.ts), and reports the outcome. At most 20 a day.
+ * HTTP with no cookies and no session values (clean.ts), only to public addresses, and reports the
+ * outcome. At most 20 a day. A candidate that needs the browser (minTier above 1) is skipped: plain HTTP
+ * would fail it whether it works or not.
  */
 import { join } from "node:path";
 import { cleanCall } from "./clean.js";
@@ -65,13 +67,14 @@ export async function verifyCandidates(
     for (const job of jobs ?? []) {
       if (o.signal?.aborted) break;
       const c = await candidate(job, sites, o.signal).catch(() => undefined);
-      if (!c?.op.readOnly) continue;
+      if (!c?.op.readOnly || c.op.minTier > 1) continue;
       if (!spend(o.now ?? new Date())) break;
       const fetchImpl = o.fetchImpl ?? fetch;
       const r = await cleanCall(c.op, job.args ?? {}, {
         site: c.site,
         fetchImpl: o.signal ? withSignal(fetchImpl, o.signal) : fetchImpl,
         minIntervalMs: o.minIntervalMs,
+        publicOnly: true,
       });
       ran++;
       const outcome = outcomeOf(r.class);

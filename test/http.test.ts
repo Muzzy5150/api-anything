@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { buildRequest, nextHop, send } from "../src/http.js";
+import { buildRequest, nextHop, privateAddress, publicAddress, resolver, send } from "../src/http.js";
 import type { Session } from "../src/session.js";
 import { type Operation, OperationSchema } from "../src/spec.js";
 import type { StoredCookie } from "../src/types.js";
@@ -303,4 +303,64 @@ test("a redirect to another origin is refused when its Location repeats a header
     );
   assert.equal(nextHop(get, held, from, 302, `/landing?t=${enc(v)}`).url, `https://x.com/landing?t=${enc(v)}`);
   assert.deepEqual(nextHop(get, held, from, 302, "https://evil.example/landing").headers, {});
+});
+
+test("privateAddress: this host, private, link-local, CGNAT, unique-local and reserved ranges, IPv4 inside IPv6 too", () => {
+  for (const ip of [
+    "0.0.0.0",
+    "127.0.0.1",
+    "127.8.9.10",
+    "10.1.2.3",
+    "172.16.0.1",
+    "172.31.255.255",
+    "192.168.1.1",
+    "169.254.169.254",
+    "100.64.0.1",
+    "100.127.255.255",
+    "224.0.0.1",
+    "255.255.255.255",
+    "::",
+    "::1",
+    "fc00::1",
+    "fd12:3456::1",
+    "fe80::1",
+    "ff02::1",
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "64:ff9b::10.0.0.1",
+    "not an address",
+  ])
+    assert.equal(privateAddress(ip), true, ip);
+  for (const ip of [
+    "93.184.215.14",
+    "8.8.8.8",
+    "172.32.0.1",
+    "100.128.0.1",
+    "192.169.0.1",
+    "2606:2800:220:1::1",
+    "::ffff:93.184.215.14",
+  ])
+    assert.equal(privateAddress(ip), false, ip);
+});
+
+test("publicAddress: https to a public host whose every address is public", async () => {
+  const lookup = resolver.lookup;
+  try {
+    resolver.lookup = async (host) =>
+      host === "split.example.com"
+        ? [{ address: "93.184.215.14" }, { address: "10.0.0.2" }]
+        : host === "gone.example.com"
+          ? Promise.reject(Object.assign(new Error("not found"), { code: "ENOTFOUND" }))
+          : [{ address: "93.184.215.14" }];
+    assert.equal(await publicAddress("https://www.example.com/x"), undefined);
+    assert.match((await publicAddress("http://www.example.com/x"))!, /is not https/);
+    assert.match((await publicAddress("https://127.0.0.1/x"))!, /no public host/);
+    assert.match((await publicAddress("https://split.example.com/"))!, /non-public address 10\.0\.0\.2/);
+    assert.match(
+      (await publicAddress("https://gone.example.com/"))!,
+      /does not resolve \(gone\.example\.com: ENOTFOUND\)/,
+    );
+  } finally {
+    resolver.lookup = lookup;
+  }
 });

@@ -13,6 +13,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { verifySite } from "../src/checks.js";
 import { call, heal } from "../src/execute.js";
 import { healOperation } from "../src/heal.js";
+import { resolver } from "../src/http.js";
 import { createServer as createMcpServer } from "../src/mcp.js";
 import { type OpPlan, plan } from "../src/publish.js";
 import { pull, search, summarize } from "../src/registry.js";
@@ -231,11 +232,17 @@ test("the shared rules refuse what a hostile or careless spec could do with some
 /* --------------------------------------------------------------- pull */
 
 let fake: FakeRegistry;
+const realLookup = resolver.lookup;
 before(async () => {
   fake = await startRegistry();
   process.env.API_ANYTHING_REGISTRY = fake.url;
+  // a pulled spec's host is resolved before it is sent to: here to a public address, with no DNS query
+  resolver.lookup = async () => [{ address: "93.184.215.14" }];
 });
-after(() => fake.close());
+after(() => {
+  resolver.lookup = realLookup;
+  return fake.close();
+});
 beforeEach(() => {
   process.env.API_ANYTHING_HOME = mkdtempSync(join(tmpdir(), "aa-registry-"));
   fake.sites.clear();
@@ -455,7 +462,9 @@ test("publish previews what may be the publisher's own, and strips their history
     join(userSitesDir(), "demo.md"),
     "Ask jo@example.org about 123e4567-e89b-12d3-a456-426614174000.\n\n## Maintainer notes\nnot sent\n",
   );
-  const p = plan("demo");
+  // what publish --yes sends: the notes go with the user's yes, and only then
+  assert.equal(plan("demo").ops[0]!.upload.site.notes, undefined);
+  const p = plan("demo", { consent: true });
   assert.deepEqual(p.errors, []);
   const personal = p.personal.join("\n");
   assert.match(personal, /holds an email address \(me@mail\.example\.com\)/);
@@ -906,4 +915,147 @@ test("MCP with --allow-writes still answers a site that does not load in call_op
   } finally {
     await client.close();
   }
+});
+
+/* ------------------------------------------- someone else's spec and the user's sessions */
+
+const post = (readOnly: boolean) =>
+  spec(
+    {},
+    {
+      request: {
+        method: "POST",
+        url: "https://news.example.com/api/search",
+        headers: { "content-type": "application/json", "x-token": "" },
+        body: '{"q":"kittens"}',
+      },
+      slots: [
+        { param: "q", at: ["body", "json:/q"] },
+        { ref: "session:search/token", at: ["header:x-token"] },
+      ],
+      readOnly,
+    },
+  );
+
+/** The user's session for news.example.com: a cookie, and a session value bound to the host. */
+const signedIn = (site: string) =>
+  saveSession(site, {
+    cookies: [
+      {
+        name: "sid",
+        value: "s3cr3t-sid",
+        domain: "news.example.com",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+      },
+    ],
+    values: { "search/token": "s3cr3t-token" },
+    valueHosts: { "search/token": "news.example.com" },
+  });
+
+/** Each request's url, cookie and x-token, answering with data. */
+function recorder() {
+  const seen: { url: string; cookie: string | null; token: string | null }[] = [];
+  const fetchImpl = (async (u: string | URL | Request, init?: RequestInit) => {
+    const h = new Headers(init?.headers);
+    seen.push({ url: String(u), cookie: h.get("cookie"), token: h.get("x-token") });
+    return json({ hits: [{ title: "cats" }] });
+  }) as typeof fetch;
+  return { seen, fetchImpl };
+}
+
+test("someone else's op that is no GET or HEAD gets none of the user's cookies or session values, unless a human pulled a write and writes are allowed", async () => {
+  const sends = async (site: string, q: string, o: { allowWrites?: boolean } = {}) => {
+    const r = recorder();
+    const res = await call(site, "search", { q }, { maxTier: 1, minIntervalMs: 0, fetchImpl: r.fetchImpl, ...o });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(r.seen.length, 1);
+    return r.seen[0]!;
+  };
+  const none = { cookie: null, token: null };
+  const all = { cookie: "sid=s3cr3t-sid", token: "s3cr3t-token" };
+  const creds = (s: { cookie: string | null; token: string | null }) => ({ cookie: s.cookie, token: s.token });
+
+  // a "read" sent as POST: it may be a write, so it goes bare
+  share(post(true));
+  await pull("demo");
+  signedIn("demo");
+  assert.deepEqual(creds(await sends("demo", "cats")), none);
+
+  // a write a human pulled, called with writes allowed: the user asked for it
+  share(post(false));
+  await pull("demo");
+  signedIn("demo");
+  assert.deepEqual(creds(await sends("demo", "w1", { allowWrites: true })), all);
+  // the same write an agent pulled goes bare: page text may have steered the agent to it
+  await pull("demo", { by: "agent" });
+  signedIn("demo");
+  assert.deepEqual(creds(await sends("demo", "w2", { allowWrites: true })), none);
+
+  // someone else's GET read keeps the user's cookies, as before
+  share(spec());
+  await pull("demo");
+  signedIn("demo");
+  assert.equal((await sends("demo", "cats")).cookie, "sid=s3cr3t-sid");
+
+  // the user's own POST read is unchanged
+  saveSite({ ...post(true), name: "mine" });
+  signedIn("mine");
+  assert.deepEqual(creds(await sends("mine", "cats")), all);
+});
+
+test("someone else's spec sends only to public addresses: a redirect into the network, or a host that resolves into it, is refused unsent", async () => {
+  share(spec());
+  await pull("demo");
+  const urls: string[] = [];
+  const redirectTo = (location: string) =>
+    (async (u: string | URL | Request) => {
+      urls.push(String(u));
+      return String(u).startsWith("https://news.example.com/")
+        ? new Response(null, { status: 302, headers: { location } })
+        : json({ hits: [{ title: "inside" }] });
+    }) as typeof fetch;
+  const opts = (fetchImpl: typeof fetch) => ({ maxTier: 1 as const, minIntervalMs: 0, fetchImpl });
+
+  for (const location of [
+    "http://127.0.0.1:8080/admin/reboot",
+    "https://192.168.1.1/admin",
+    "https://localhost/admin",
+    "http://www.example.org/api",
+  ]) {
+    urls.length = 0;
+    const r = await call("demo", "search", { q: "cats" }, opts(redirectTo(location)));
+    assert.equal(r.ok, false, location);
+    assert.match(r.reason ?? "", /not following the HTTP 302 redirect/, location);
+    assert.deepEqual(urls, ["https://news.example.com/api/search?q=cats"], `${location} was never fetched`);
+  }
+
+  // a public name that resolves to a private address, first or after a redirect
+  const lookup = resolver.lookup;
+  try {
+    resolver.lookup = async (host) => [{ address: host === "news.example.com" ? "93.184.215.14" : "10.0.0.7" }];
+    urls.length = 0;
+    const hop = await call("demo", "search", { q: "cats" }, opts(redirectTo("https://intranet.example.org/x")));
+    assert.match(hop.reason ?? "", /resolves to the non-public address 10\.0\.0\.7/);
+    assert.equal(urls.length, 1);
+
+    resolver.lookup = async () => [{ address: "93.184.215.14" }, { address: "::ffff:127.0.0.1" }];
+    urls.length = 0;
+    const first = await call("demo", "search", { q: "cats" }, opts(redirectTo("https://x.example.org/")));
+    assert.equal(first.ok, false);
+    assert.match(first.reason ?? "", /not sending search: .*non-public address ::ffff:127\.0\.0\.1/);
+    assert.equal(first.write, undefined);
+    assert.deepEqual(urls, [], "nothing was sent");
+  } finally {
+    resolver.lookup = lookup;
+  }
+
+  // the user's own spec follows its redirects as before
+  saveSite({ ...spec(), name: "mine" });
+  urls.length = 0;
+  const mine = await call("mine", "search", { q: "cats" }, opts(redirectTo("http://127.0.0.1:8080/api")));
+  assert.equal(mine.ok, true, JSON.stringify(mine));
+  assert.equal(urls.length, 2);
 });

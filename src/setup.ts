@@ -31,7 +31,7 @@ const LABEL: Record<Agent, string> = {
 };
 
 export const QUESTION =
-  "Help build the shared catalog? Your agent will share what it learns from public pages (never logins, never your data), report whether calls work, and check a few new operations a day in the background.";
+  "Help build the shared catalog? Your agent will share operations it learns from public pages (never your cookies or logins), report under this install's anonymous key whether calls work, and test a few new operations a day from your network. Site searches go to the catalog either way.";
 
 export const paths = {
   claudeJson: () => join(homedir(), ".claude.json"),
@@ -339,7 +339,7 @@ export function summary(r: SetupResult): string {
       ? r.dryRun
         ? "Sharing: would be asked on a terminal (default yes); --yes or --no-share answers it"
         : "Sharing: not asked yet, so nothing is shared. Answer with: api-anything setup --yes (or --no-share)"
-      : `Sharing: ${r.dryRun ? "would be " : ""}${r.share ? "on. Your agent shares what it learns from public pages, never logins or your data." : "off."}`;
+      : `Sharing: ${r.dryRun ? "would be " : ""}${r.share ? "on. Your agent shares operations it learns from public pages, reports whether calls work, and tests a few new operations a day; never your cookies or logins." : "off."}`;
   return [
     `api-anything setup${r.dryRun ? " (dry run: nothing was changed)" : ""}`,
     ...lines,
