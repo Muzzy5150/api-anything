@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { asText } from "./codec.js";
-import { type CallOptions, type CallResult, call } from "./execute.js";
+import { type CallOptions, type CallResult, call, exampleArgs } from "./execute.js";
 import { home, readJson, safeName, writePrivate } from "./session.js";
 import type { Check, Operation, Site } from "./spec.js";
 import { loadSite, updateSite } from "./store.js";
@@ -64,17 +64,6 @@ export function judgeCase(expect: Check["expect"], r: CallResult): { outcome: Ou
   if (!r.ok && (r.class === "blocked" || r.class === "auth" || r.class === "rate" || r.server))
     return { outcome: "inconclusive", got };
   return { outcome: got === expect ? "pass" : "fail", got };
-}
-
-/** The op's stored example args, defaults filled; undefined when a required param has neither. */
-function exampleArgs(op: Operation): Record<string, unknown> | undefined {
-  const out: Record<string, unknown> = {};
-  for (const p of op.params) {
-    const v = p.example ?? p.default;
-    if (v !== undefined) out[p.name] = v;
-    else if (p.required) return undefined;
-  }
-  return out;
 }
 
 /**

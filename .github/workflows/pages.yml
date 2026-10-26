@@ -1,10 +1,13 @@
 name: Pages
 
-# The registry's index (and, later, its site pages) is built from main after every merge and served on
-# GitHub Pages: `search` and MCP `find_sites` read index.json there. Nothing here runs a spec.
+# The registry's index, health and site pages, built from main and served on GitHub Pages: `search` and
+# MCP `find_sites` read index.json there. Daily (or by hand) the health check first calls every shared
+# read that needs no account; a push to main reuses the deployed health, so a merge does not wipe it.
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,16 +19,29 @@ concurrency:
 
 jobs:
   build:
+    # ubuntu-24.04 has Google Chrome, which the health check's browser tiers use
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      DEPLOYED: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # the whole history: site pages list each spec's contributors from git log
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run pages -- _site
+      # absent on the first run (a 404), so nothing is carried over
+      - run: curl -fsSL --retry 2 -o previous-health.json "$DEPLOYED/health.json" || rm -f previous-health.json
+      - if: github.event_name != 'push'
+        run: npm run health -- health.json previous-health.json
+        continue-on-error: true
+      # a push, or a health run that failed outright, keeps the deployed health
+      - run: if [ ! -f health.json ] && [ -f previous-health.json ]; then cp previous-health.json health.json; fi
+      - run: npm run pages -- _site health.json
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site

@@ -78,11 +78,13 @@ export function siteNotes(name: string, bundledDir = BUNDLED_DIR): string | unde
   for (const [dir] of specDirs(bundledDir)) {
     const text = notesAt(join(dir, `${safeName(name)}.md`));
     if (text === undefined) continue;
-    const [forCallers] = text.split(/^## Maintainer notes\s*$/im);
-    return forCallers!.trim();
+    return forCallers(text);
   }
   return undefined;
 }
+
+/** The part of a site's notes for whoever calls it: the text before a `## Maintainer notes` heading. */
+export const forCallers = (notes: string): string => notes.split(/^## Maintainer notes\s*$/im)[0]!.trim();
 
 const notesAt = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : undefined);
 

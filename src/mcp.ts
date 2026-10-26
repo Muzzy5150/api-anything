@@ -14,7 +14,7 @@ import { call, type NextCall } from "./execute.js";
 import { returnedFields } from "./extract.js";
 import { profileDir } from "./heal.js";
 import { browserSource, cookieNames, importSession, loggedIn, resolveLoginTarget } from "./login.js";
-import { type IndexCache, type Pulled, pull, search } from "./registry.js";
+import { type Found, type IndexCache, type Pulled, pull, search } from "./registry.js";
 import { loadSession, saveSession, sessionFile, withLock } from "./session.js";
 import { listSites, loadSite, siteNotes } from "./store.js";
 import { SHARED_NOTE } from "./vet.js";
@@ -42,6 +42,18 @@ export function mcpNext(next: string): string {
   return /\bapi-anything (heal|add|capture|verify|export)\b/.test(out)
     ? `${out} (api-anything is a CLI: run it in your shell, as npx -y github:goodnight000/api-anything when the command is not installed; with no shell, ask the user)`
     : out;
+}
+
+const CHECKED_NOTE =
+  "[worked/failed <date>] is a daily check that calls each read needing no account with its examples, from GitHub's servers; one that failed there may still work from the user's machine";
+
+/** An op as find_sites lists it: its signature, and what the registry's last check of it found. */
+function withHealth(o: Found["operations"][number]): string {
+  const h = o.health;
+  if (!h) return o.op;
+  const day = (iso: string) => iso.slice(0, 10);
+  if (h.ok) return `${o.op} [worked ${day(h.checkedAt)}]`;
+  return `${o.op} [failed ${day(h.checkedAt)}${h.lastOk ? `, last worked ${day(h.lastOk)}` : ""}]`;
 }
 
 /**
@@ -181,9 +193,10 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
       return reply({
         matches: r.matches.map((m) => ({
           ...m,
-          operations: m.operations.filter((o) => !o.write).map((o) => o.op),
+          operations: m.operations.filter((o) => !o.write).map(withHealth),
         })),
         ...(r.registryError ? { registryError: r.registryError } : {}),
+        ...(r.matches.some((m) => m.operations.some((o) => o.health)) ? { checked: CHECKED_NOTE } : {}),
         // bundled and pulled specs are someone else's too, installed or not
         ...(r.matches.length ? { shared: SHARED_NOTE } : {}),
         next: top

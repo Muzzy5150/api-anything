@@ -88,8 +88,9 @@ request and the fields. API Anything builds the template without an LLM.
 ## Use and share specs
 
 Someone may have learned the site already. `search` looks through the registry (this repository's
-`sites/`) by what you need, a domain or a URL, and `pull` fetches a spec, checked against the shared
-rules first:
+`sites/`, also [browsable with daily health checks](https://goodnight000.github.io/api-anything/))
+by what you need, a domain or a URL, and `pull` fetches a spec, checked against the shared rules
+first:
 
 ```sh
 api-anything search book ratings        # or goodreads.com, or a page's URL

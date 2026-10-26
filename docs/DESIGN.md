@@ -910,7 +910,27 @@ query matches the entries whose domains hold its registrable domain; words (lowe
 "news") are scored against the site's name (most), its title and domains, then its description and
 ops (op names and fields split at camelCase; part of a longer word there counts from 5 letters), a
 word that matches nothing counting against the site; a site under a third of
-the best score matched a stray word and is left out. No ranking by use or health yet.
+the best score matched a stray word and is left out. Between equal scores, a site whose every checked
+op failed its last health check comes after one that did not; it is still listed. No ranking by use.
+A local copy shows the registry's health only when it is the same spec (the same SHA-256; for a
+pulled one, the hash pull recorded).
+
+**Site pages and health.** The Pages workflow also builds a home page that lists and searches every
+shared site, and a page per site (`sites/<site>/`): what each op takes and returns, whether it needs
+a login or writes, a sample `pull` and `call` with the params' examples, the notes before
+`## Maintainer notes`, a link to the spec, and its contributors from the git history. Every string
+from a spec, its notes or git is escaped, and none reaches a script; the pages load nothing from
+elsewhere. Daily, and when run by hand, `scripts/health.ts` first calls every op that is
+`readOnly`, not `learnedLoggedIn`, and has an `example` or `default` for each required param, with
+those args, one call at a time, through `call()` in a fresh home (no session, no cookie: a
+first-time user), and records `ok`, `class`, `tier`, `ms`, `checkedAt`, the redacted reason cut to
+200 characters, and `lastOk`, carried over from the deployed `health.json`. A push to main reuses
+the deployed file instead of checking again. Each op's `{ok, checkedAt, lastOk}` goes into the
+index; `search` returns it and MCP `find_sites` shows it beside each op. What it does not say: ops
+that need an account, writes and ops without examples are never checked; the calls come from
+GitHub's runners, whose IPs some sites block more than a home connection, so a failure there may
+still work for a user; a pass means the example args answered, not that every arg will; and a spec
+changed by a push keeps the last check's health until the next run.
 
 **Agents pull.** MCP `list_operations` on a site that is not installed pulls it from the registry,
 so an agent with no shell reaches every shared site, and the user never has to know a site's name.
@@ -928,7 +948,8 @@ run on it on every load.
 says it can be shared (`next: api-anything publish <site>`). The skill tells the agent to `search`
 before `capture`.
 
-Not in this version: signed or commit-pinned pulls, health reports from users' calls, runtime
+Not in this version: signed or commit-pinned pulls, health reports from users' calls (the health
+above is the registry's own check), runtime
 checks of resolved addresses, a bounded regex engine, and MCP `publish`.
 
 ## Logging in (`login.ts`, `import.ts`)

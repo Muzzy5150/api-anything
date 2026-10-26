@@ -268,7 +268,7 @@ const success = (a: Attempt, extra: Partial<Result> = {}): Result => ({
 });
 
 /** The op's stored example args, with defaults; undefined when a required param has none. */
-function exampleArgs(op: Operation): Record<string, unknown> | undefined {
+export function exampleArgs(op: Operation): Record<string, unknown> | undefined {
   const out: Record<string, unknown> = {};
   for (const p of op.params) {
     const v = p.example ?? p.default;

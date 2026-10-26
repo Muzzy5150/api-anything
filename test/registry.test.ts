@@ -747,7 +747,7 @@ test("the index CI builds lists every bundled spec, its hash, its domains and it
   );
   // what Pages serves is the same index
   const out = mkdtempSync(join(tmpdir(), "aa-pages-"));
-  buildPages(dir, out, "2026-10-25T00:00:00.000Z");
+  buildPages(dir, out, { generated: "2026-10-25T00:00:00.000Z" });
   assert.deepEqual(JSON.parse(readFileSync(join(out, "index.json"), "utf8")), index);
 });
 
@@ -814,6 +814,60 @@ test("search marks a site this machine has as installed, and still answers when 
   assert.match(r.registryError ?? "", /no index at http:\/\/127\.0\.0\.1:\d+\/index\.json/);
   served.set("/index.json", { body: '{"sites":"no"}' });
   assert.match((await search("x")).registryError ?? "", /index\.json/);
+});
+
+test("health: a site whose checked ops all failed ranks below an equal match, and search and find_sites say per op", async () => {
+  const day = "2026-10-25T06:00:00.000Z";
+  served.set("/index.json", {
+    body: JSON.stringify({
+      generated: day,
+      sites: [
+        indexEntry(books, JSON.stringify(books), {
+          searchBooks: { ok: false, checkedAt: day, lastOk: "2026-10-20T06:00:00.000Z" },
+        }),
+        indexEntry(spec(), JSON.stringify(spec()), { search: { ok: true, checkedAt: day } }),
+      ],
+    }),
+  });
+  const r = await search("search", { local: [] });
+  assert.deepEqual(
+    r.matches.map((m) => m.site),
+    ["demo", "bookshelf"],
+    "equal scores: the one that works first, the other still listed",
+  );
+  assert.deepEqual(r.matches[1]!.operations[0]!.health, {
+    ok: false,
+    checkedAt: day,
+    lastOk: "2026-10-20T06:00:00.000Z",
+  });
+  assert.deepEqual((await search("bookshelf", { local: [] })).matches[0]!.operations[0]!.health?.ok, false);
+
+  share(books);
+  await pull("bookshelf");
+  const [installed] = (await search("bookshelf")).matches;
+  assert.equal(installed!.installed, true);
+  assert.equal(
+    installed!.operations[0]!.health?.ok,
+    false,
+    "a pulled copy of the same spec shows the registry's check",
+  );
+
+  const client = new Client({ name: "probe", version: "0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await createMcpServer().connect(a);
+  await client.connect(b);
+  try {
+    const find = async (query: string) =>
+      JSON.parse(
+        ((await client.callTool({ name: "find_sites", arguments: { query } })).content as { text: string }[])[0]!.text,
+      );
+    const failed = await find("bookshelf");
+    assert.deepEqual(failed.matches[0].operations, ["searchBooks(q) [failed 2026-10-25, last worked 2026-10-20]"]);
+    assert.match(failed.checked, /daily check .* from GitHub's servers/);
+    assert.deepEqual((await find("news.example.com")).matches[0].operations, ["search(q) [worked 2026-10-25]"]);
+  } finally {
+    await client.close();
+  }
 });
 
 test("MCP: find_sites, then list_operations pulls the shared site, whose writes stay hidden until a human pulls it", async () => {

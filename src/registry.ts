@@ -159,6 +159,7 @@ function changes(before: Site, after: Site) {
 // The index reaches the agent as text, so it is held to the limits the shared rules put on a spec.
 const text = z.string().max(LIMITS.text);
 const HOST = z.string().regex(/^[a-z0-9.-]{1,253}$/);
+const OpHealthSchema = z.object({ ok: z.boolean(), checkedAt: z.string(), lastOk: z.string().optional() });
 const IndexOpSchema = z.object({
   // a signature: `name(params) -> fields`, whose name the shared rules restrict
   op: z
@@ -170,6 +171,8 @@ const IndexOpSchema = z.object({
   write: z.literal(true).optional(),
   login: z.literal(true).optional(),
   description: text.optional(),
+  /** the last health check's answer; ops that write or need a login are never checked */
+  health: OpHealthSchema.optional(),
 });
 const IndexEntrySchema = z.object({
   site: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
@@ -183,6 +186,8 @@ const IndexEntrySchema = z.object({
 const IndexSchema = z.object({ generated: z.string(), sites: z.array(IndexEntrySchema) });
 export type IndexEntry = z.infer<typeof IndexEntrySchema>;
 export type RegistryIndex = z.infer<typeof IndexSchema>;
+/** Per site, per op: the last check `scripts/health.ts` made. Other fields of a check are left out of the index. */
+export type Health = Record<string, Record<string, z.infer<typeof OpHealthSchema>>>;
 
 /** The index for 10k sites is a few MB; past this something is wrong. */
 const INDEX_CAP = 32 * 1024 * 1024;
@@ -190,7 +195,7 @@ const INDEX_CAP = 32 * 1024 * 1024;
 /** Where search reads the index: the Pages copy, or `index.json` beside the specs of a registry `API_ANYTHING_REGISTRY` names. */
 export const indexUrl = () => `${process.env.API_ANYTHING_REGISTRY ? registryBase() : PAGES}/index.json`;
 
-export function indexEntry(site: Site, text: string): IndexEntry {
+export function indexEntry(site: Site, text: string, health: Health[string] = {}): IndexEntry {
   return {
     site: site.name,
     ...(site.displayName ? { displayName: site.displayName } : {}),
@@ -199,21 +204,30 @@ export function indexEntry(site: Site, text: string): IndexEntry {
       ...new Set([new URL(site.baseUrl).hostname, ...site.operations.flatMap(hostsOf)].map((h) => siteOf(h))),
     ].sort(),
     sha256: createHash("sha256").update(text).digest("hex"),
-    operations: site.operations.map((op) => ({
-      ...summarize(op),
-      ...(op.description ? { description: op.description } : {}),
-    })),
+    operations: site.operations.map((op) => {
+      const h = Object.hasOwn(health, op.name) ? health[op.name] : undefined;
+      return {
+        ...summarize(op),
+        ...(op.description ? { description: op.description } : {}),
+        ...(h ? { health: { ok: h.ok, checkedAt: h.checkedAt, ...(h.lastOk ? { lastOk: h.lastOk } : {}) } } : {}),
+      };
+    }),
   };
 }
 
 /** The index of a directory of specs (the registry's `sites/`), as CI builds it on every merge. */
-export function buildIndex(dir: string, generated = new Date().toISOString()): RegistryIndex {
+export function buildIndex(dir: string, generated = new Date().toISOString(), health: Health = {}): RegistryIndex {
   const sites = readdirSync(dir)
     .filter((f) => f.endsWith(".json") && f !== "index.json")
     .sort()
     .map((f) => {
       const text = readFileSync(join(dir, f), "utf8");
-      return indexEntry({ ...parseSite(JSON.parse(text)), name: f.slice(0, -5) }, text);
+      const name = f.slice(0, -5);
+      return indexEntry(
+        { ...parseSite(JSON.parse(text)), name },
+        text,
+        Object.hasOwn(health, name) ? health[name] : {},
+      );
     });
   return { generated, sites };
 }
@@ -245,7 +259,7 @@ export async function fetchIndex(o: { fetchImpl?: typeof fetch; cache?: IndexCac
 }
 
 // Words that say nothing about which site: a query is often a sentence ("the weather in paris").
-const STOP = new Set(
+export const STOP = new Set(
   "and are best can cheap find for from get how into list near new now of on one or out per show some than that the their them then this top what when where which who why with you your".split(
     " ",
   ),
@@ -274,6 +288,16 @@ function domainOf(query: string): string | undefined {
   }
 }
 
+/** An entry's words as search weighs them: the site's name, its title and domains, what its ops do and return. */
+export const searchWords = (e: IndexEntry) => ({
+  name: words(e.site),
+  title: words(`${e.displayName ?? ""} ${e.domains.join(" ")}`),
+  about: [
+    ...words([e.description, ...e.operations.map((o) => o.description)].filter(Boolean).join(" ")),
+    ...opWords(e.operations.map((o) => o.op).join(" ")),
+  ],
+});
+
 /**
  * How well an entry answers a query: a domain query matches the domains the spec uses; words weigh most in
  * the site's name, then its title and domains, then what its ops say they do and return.
@@ -281,12 +305,7 @@ function domainOf(query: string): string | undefined {
 export function score(e: IndexEntry, query: string): number {
   const domain = domainOf(query);
   if (domain) return e.domains.includes(domain) ? 100 : 0;
-  const name = words(e.site);
-  const title = words(`${e.displayName ?? ""} ${e.domains.join(" ")}`);
-  const about = [
-    ...words([e.description, ...e.operations.map((o) => o.description)].filter(Boolean).join(" ")),
-    ...opWords(e.operations.map((o) => o.op).join(" ")),
-  ];
+  const { name, title, about } = searchWords(e);
   let total = 0;
   for (const w of new Set(words(query))) {
     // part of a longer word: "book" in "bookshelf"; in the ops' text only from 5 letters, where "time" is in "datetime"
@@ -299,12 +318,21 @@ export function score(e: IndexEntry, query: string): number {
   return total;
 }
 
+/** Every op the last check reached failed: still listed, behind an equal match that works. */
+export function failing(e: Pick<IndexEntry, "operations">): boolean {
+  const checked = e.operations.filter((o) => o.health);
+  return checked.length > 0 && checked.every((o) => !o.health!.ok);
+}
+
 /** This machine's specs as index entries; one that does not load is left out, as `sites` reports it. */
 export function localEntries(): IndexEntry[] {
   return listSites().flatMap((name) => {
     try {
       const r = loadSite(name);
-      return r ? [indexEntry(r.site, readFileSync(r.path, "utf8"))] : [];
+      if (!r) return [];
+      const e = indexEntry(r.site, readFileSync(r.path, "utf8"));
+      // a pulled spec is the registry's file plus its record: the hash pull took names the shared one
+      return [r.site.shared ? { ...e, sha256: r.site.shared.sha256 } : e];
     } catch {
       return [];
     }
@@ -338,10 +366,16 @@ export async function search(
   }
   const local = o.local ?? localEntries();
   const installed = new Set(local.map((e) => e.site));
-  const entries = [...local, ...remote.filter((e) => !installed.has(e.site))];
+  const shared = new Map(remote.map((e) => [e.site, e]));
+  // the registry's health answers for a local copy only when it is the same spec
+  const withHealth = (e: IndexEntry): IndexEntry => {
+    const r = shared.get(e.site);
+    return r?.sha256 === e.sha256 ? { ...e, operations: r.operations } : e;
+  };
+  const entries = [...local.map(withHealth), ...remote.filter((e) => !installed.has(e.site))];
   const scored = entries
     .map((e) => ({ e, s: score(e, query) }))
-    .sort((a, b) => b.s - a.s || a.e.site.localeCompare(b.e.site));
+    .sort((a, b) => b.s - a.s || Number(failing(a.e)) - Number(failing(b.e)) || a.e.site.localeCompare(b.e.site));
   // a site far behind the best answer matched a stray word
   const best = scored[0]?.s ?? 0;
   const matches = scored

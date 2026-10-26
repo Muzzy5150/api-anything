@@ -38,6 +38,7 @@
     "format": "biome check --write .",
     "demo": "node examples/research.mjs",
     "pages": "tsx scripts/pages.ts",
+    "health": "tsx scripts/health.ts",
     "review": "tsx scripts/review.ts"
   },
   "keywords": [
