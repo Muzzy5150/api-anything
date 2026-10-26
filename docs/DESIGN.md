@@ -863,14 +863,36 @@ does not block. Check args are literals the publisher typed, shared with the spe
 scan lists every check's args for the publisher to confirm, and an `enum` value holding a run of 5+
 digits (an account's id rather than one of the site's options).
 
+**Search.** `api-anything search <words | domain | url>` and MCP `find_sites` read the registry's
+index: `index.json`, which CI builds from `sites/` on every push to main (`scripts/pages.ts`, the
+Pages workflow) and serves on GitHub Pages, so contributors never edit a shared file and two pull
+requests never conflict over it. With `API_ANYTHING_REGISTRY` set, the index is `index.json` beside
+that registry's `sites/`. Each entry: the site, its title and description, the registrable domains its
+ops send to or open, the spec's SHA-256, and each op as pull summarizes it with its description. The
+index is fetched like a spec (no redirect, a size cap, a timeout) and parsed by a schema. Local specs
+(the user's, pulled and bundled) are merged in as `installed`, so a site learned here and never shared
+is found too, and an index that cannot be fetched leaves those with a `registryError`. A domain or URL
+query matches the entries whose domains hold its registrable domain; words are scored against the
+site's name (most), its title and domains, then its description and ops (names split at camelCase, a
+plural `s` dropped), a word that matches nothing counting against the site; a site under a third of
+the best score matched a stray word and is left out. No ranking by use or health yet.
+
+**Agents pull.** MCP `list_operations` on a site that is not installed pulls it from the registry,
+so an agent with no shell reaches every shared site, and the user never has to know a site's name.
+Pulled this way, the spec's record says `by: "agent"`, and the server neither lists nor runs its
+writes, whatever `--allow-writes` says: page text may have steered the agent to it, so a write waits
+for a human's own `api-anything pull`, which rewrites the record without `by`. Its reads run with
+what the user already set up and nothing more: a session exists only if a human logged in to that
+site with the CLI or a login window, and session values stay bound to their hosts. This is the same
+trust as a human's pull, since the registry's specs are reviewed (see Trust model), and the same rules
+run on it on every load.
+
 **Nudges, not automation.** Once `verify <site>` passes for a site the user learned, its output
-says it can be shared (`next: api-anything publish <site>`). The skill tells the agent to try `pull`
+says it can be shared (`next: api-anything publish <site>`). The skill tells the agent to `search`
 before `capture`.
 
-Not in this version: search across the registry (an index file CI keeps in sync), signed or
-commit-pinned pulls, health reports from users' calls, runtime checks of resolved addresses, a
-bounded regex engine, and MCP `pull`/`publish` (MCP cannot create operations; pulling one is
-creating one).
+Not in this version: signed or commit-pinned pulls, health reports from users' calls, runtime
+checks of resolved addresses, a bounded regex engine, and MCP `publish`.
 
 ## Logging in (`login.ts`, `import.ts`)
 
@@ -972,12 +994,13 @@ independent alternative.
     a write `write` (see Writes). `next` stays, for a reader; `nextCall` is the same step for a
     program. `test/execute.test.ts` checks the fields over every class, a read and a write, and
     what was sent.
-- **MCP server** (`api-anything mcp`) with fixed meta-tools: `list_sites`, `list_operations`,
+- **MCP server** (`api-anything mcp`) with fixed meta-tools: `list_sites`, `find_sites`, `list_operations`,
   `call_operation`, and `login` (so an agent can fix an `auth` failure itself), so the tool list
-  costs the same at 2 sites or 200. The agent may be steered by page content, so MCP `login` import
+  costs the same at 2 sites or 200. `find_sites` is `search` (see Sharing specs); `list_operations` on
+  a site that is not installed pulls it from the registry first (see "Agents pull" below). The agent may be steered by page content, so MCP `login` import
   only refreshes a site that has a spec and a browser source a human chose with the CLI, from that
   same profile; anything else answers `next`: ask the user to run `api-anything login <site>`. Mode
-  window is allowed (a human signs in). MCP cannot create operations: capture and add are CLI only. Writes are hidden unless
+  window is allowed (a human signs in). MCP cannot learn operations: capture and add are CLI only. Writes are hidden unless
   it is started with `--allow-writes`. `list_operations` carries each op's `returns`, the site's notes and each param's
   `hint`/`pattern`. A `next` served over MCP names the tools (`list_operations {"site":"x"}`, the
   `login` tool) instead of CLI commands, and tells the agent to run a CLI-only one (heal, add) in its

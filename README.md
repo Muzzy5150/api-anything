@@ -60,8 +60,9 @@ api-anything call hacker-news search query=sqlite
 
 </details>
 
-Over MCP an agent **calls** operations, using four tools: `list_sites`, `list_operations`,
-`call_operation` and `login`. To **create** operations, an agent needs a shell and the
+Over MCP an agent **calls** operations, using five tools: `list_sites`, `find_sites`,
+`list_operations`, `call_operation` and `login`. `find_sites` searches the shared registry, and
+`list_operations` pulls a shared site the first time an agent asks for it, with its reads only. To **create** operations, an agent needs a shell and the
 [skill](skills/api-anything/SKILL.md). A Chromium browser is needed only for creating operations
 and for the browser tier — Google Chrome by default, or Brave, Edge, Chromium, Vivaldi, Arc; any
 Chromium executable works via `API_ANYTHING_BROWSER`. [Setup details](docs/QUICKSTART.md).
@@ -86,10 +87,12 @@ request and the fields. API Anything builds the template without an LLM.
 
 ## Use and share specs
 
-Someone may have learned the site already. `pull` fetches a spec others published to the registry
-(this repository's `sites/`), checked against the shared rules first:
+Someone may have learned the site already. `search` looks through the registry (this repository's
+`sites/`) by what you need, a domain or a URL, and `pull` fetches a spec, checked against the shared
+rules first:
 
 ```sh
+api-anything search book ratings        # or goodreads.com, or a page's URL
 api-anything pull goodreads
 api-anything call goodreads searchBooks q=piranesi
 ```

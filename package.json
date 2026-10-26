@@ -36,7 +36,8 @@
     "check": "tsc -p tsconfig.json",
     "lint": "biome ci .",
     "format": "biome check --write .",
-    "demo": "node examples/research.mjs"
+    "demo": "node examples/research.mjs",
+    "pages": "tsx scripts/pages.ts"
   },
   "keywords": [
     "api",

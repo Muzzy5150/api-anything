@@ -182,7 +182,7 @@ export const SiteSchema = z.object({
    * saved now (a heal writes a user copy): it is checked against the shared rules on every load,
    * and its heals do not rescan.
    */
-  shared: z.object({ from: z.string(), sha256: z.string() }).optional(),
+  shared: z.object({ from: z.string(), sha256: z.string(), by: z.literal("agent").optional() }).optional(),
 });
 
 export type Request = z.infer<typeof RequestSchema>;

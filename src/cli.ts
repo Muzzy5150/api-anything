@@ -25,7 +25,7 @@ import { type Candidate, capturePages, pageUrls, rankCandidates } from "./learn.
 import { cookieNames, importSession, logout, resolveLoginTarget } from "./login.js";
 import { type Outline, outline } from "./outline.js";
 import { plan, submit, writeOutbox } from "./publish.js";
-import { pull } from "./registry.js";
+import { pull, search } from "./registry.js";
 import { loadSession, loggedIn, saveSession, sessionFile, withLock } from "./session.js";
 import { CheckSchema, HtmlRecipeSchema, MatchSchema, type Operation, type Param, TriggerStepSchema } from "./spec.js";
 import { exportSite, listSites, loadSite, siteNotes, updateSite } from "./store.js";
@@ -149,6 +149,12 @@ const HELP: Record<string, string> = {
   export: `api-anything export <site> [--out <file>] [--keep-examples] [--force]
   Writes a shareable spec: examples and response shapes stripped, and refused if a live cookie or
   session value is inside. --keep-examples keeps param examples you confirmed are public (so verify works).`,
+  search: `api-anything search <words | domain | url>
+  Finds sites someone already turned into operations: the registry's index (shared specs) and the
+  specs on this machine, best match first. Words match a site's name, its description and what its
+  operations do and return ("book ratings"); a domain or a URL matches the sites whose operations
+  use it (news.ycombinator.com). Each match says whether it is installed; pull one that is not.
+  API_ANYTHING_REGISTRY overrides the registry (its index.json beside sites/).`,
   pull: `api-anything pull <site>
   Fetches a spec someone shared from the registry (the api-anything repo's sites/ on GitHub) into
   ~/.api-anything/registry, so you can call it without learning it. Someone else wrote it: it is
@@ -164,8 +170,10 @@ const HELP: Record<string, string> = {
   branch, commits under your account's noreply address, and a public pull request under your account.
   --keep-examples keeps param examples you confirmed are public (so verify works for others).`,
   mcp: `api-anything mcp [--allow-writes]
-  Serves list_sites, list_operations, call_operation and login over stdio MCP. MCP cannot create
-  operations (use capture/add here), and its login only refreshes a session a human imported here.`,
+  Serves list_sites, find_sites, list_operations, call_operation and login over stdio MCP. MCP cannot
+  learn operations (use capture/add here). list_operations pulls a shared site an agent asks for, with
+  its reads only: its writes need a human's api-anything pull. Its login only refreshes a session a
+  human imported here.`,
 };
 
 const USAGE = `api-anything ${VERSION}: turn a website into operations an agent can call.
@@ -176,7 +184,7 @@ const USAGE = `api-anything ${VERSION}: turn a website into operations an agent 
   api-anything add <site> <op> --trigger <url-template> --example k=v [--example2 k=v] [--write]
   api-anything call <site> <op> [k=v ...] [--allow-writes]
   api-anything inspect <captureId> [<requestId>]
-  api-anything pull <site> | publish <site> [--yes]
+  api-anything search <words|domain> | pull <site> | publish <site> [--yes]
   api-anything check <site> <op> [k=v ...] --expect result|empty|input
   api-anything verify [site] | sites | ops <site> | heal <site> <op> | export <site> | mcp
 
@@ -247,7 +255,7 @@ function requireSite(name: string | undefined) {
   if (!r)
     throw new Fail(
       `no site "${name}"`,
-      `api-anything pull ${name} fetches it if someone shared it; else api-anything capture and add learn it`,
+      `api-anything search ${name} finds a shared spec to pull; else api-anything capture and add learn it`,
     );
   return r;
 }
@@ -914,6 +922,26 @@ function cmdExport({ v, pos }: Parsed): number {
   return 0;
 }
 
+async function cmdSearch({ pos }: Parsed): Promise<number> {
+  const query = pos.join(" ").trim();
+  if (!query) throw new Fail("missing <words | domain | url>", "api-anything search book ratings");
+  const r = await search(query);
+  const top = r.matches[0];
+  out({
+    ok: true,
+    query,
+    matches: r.matches,
+    ...(r.registryError ? { registryError: r.registryError } : {}),
+    ...(r.matches.some((m) => !m.installed) ? { shared: SHARED_NOTE } : {}),
+    next: !top
+      ? "nobody shared one yet: learn it with api-anything capture and add, then share it with api-anything publish"
+      : top.installed
+        ? `api-anything ops ${top.site} lists its operations`
+        : `api-anything pull ${top.site} fetches it; read its warnings with the user before the first call`,
+  });
+  return 0;
+}
+
 async function cmdPull({ pos }: Parsed): Promise<number> {
   if (!pos[0]) throw new Fail("missing <site>", "api-anything pull <site>");
   let r: Awaited<ReturnType<typeof pull>>;
@@ -1032,6 +1060,7 @@ const COMMANDS: Record<string, { run: (p: Parsed) => number | Promise<number>; f
   ops: { run: cmdOps, flags: [] },
   heal: { run: cmdHeal, flags: [] },
   export: { run: cmdExport, flags: ["out", "keep-examples", "force"] },
+  search: { run: cmdSearch, flags: [] },
   pull: { run: cmdPull, flags: [] },
   publish: { run: cmdPublish, flags: ["keep-examples", "yes"] },
   mcp: { run: cmdMcp, flags: ["allow-writes"] },

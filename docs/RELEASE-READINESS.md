@@ -11,7 +11,7 @@ This is not a claim that every website, every operation, or unattended account a
 - Fresh GitHub clone → `npm ci` → pack → global install passed. Direct GitHub `npx` also passed.
   Global `npm install -g github:...` failed under npm 11.6.2; the documented pack-first route avoids it.
 - A packed production-only install exposes all eight sites and 17 operations. A real stdio MCP
-  client discovers all four tools, calls Hacker News, and receives structured failures.
+  client discovers all five tools, calls Hacker News, and receives structured failures.
 - All 17 bundled read operations returned successful direct-HTTP responses in live checks.
   LinkedIn used an existing authorized session; the other sites were logged out. Flight calendar
   dates were checked against the requested interval. These are point-in-time checks on macOS,

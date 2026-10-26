@@ -24,6 +24,7 @@ holds the evidence behind it, including the api-anything bugs that must not come
 | `src/checks.ts` | `verify`: run each read's example and checks, judge pass/fail/inconclusive, keep the record `publish` gates on |
 | `src/vet.ts` | the shared rules a spec someone else wrote must pass: on pull, publish, load and in CI |
 | `src/registry.ts`, `src/publish.ts` | pull a shared spec from the registry (`sites/` on GitHub); publish one as a pull request via `gh` |
+| `src/registry.ts` (index), `scripts/pages.ts` | the registry index CI serves on Pages; `search` and MCP `find_sites` read it |
 | `src/login.ts`, `src/import.ts` | sign in by importing the everyday browser's cookies; re-import on `auth` |
 | `src/cli.ts`, `src/mcp.ts`, `src/index.ts` | entry points |
 

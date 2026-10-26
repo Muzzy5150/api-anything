@@ -54,7 +54,7 @@ codex mcp get api-anything
 ```
 
 Restart the agent session. Ask it to list API Anything sites, then search Hacker News for sqlite.
-It should discover `list_sites`, `list_operations`, `call_operation` and `login`, and use
+It should discover `list_sites`, `find_sites`, `list_operations`, `call_operation` and `login`, and use
 `call_operation` with `site: "hacker-news"`, `op: "search"`, `args: {"query":"sqlite"}`.
 See the [official MCP setup instructions](https://developers.openai.com/codex/mcp).
 
