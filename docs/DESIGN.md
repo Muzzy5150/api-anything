@@ -869,19 +869,27 @@ Pages workflow) and serves on GitHub Pages, so contributors never edit a shared 
 requests never conflict over it. With `API_ANYTHING_REGISTRY` set, the index is `index.json` beside
 that registry's `sites/`. Each entry: the site, its title and description, the registrable domains its
 ops send to or open, the spec's SHA-256, and each op as pull summarizes it with its description. The
-index is fetched like a spec (no redirect, a size cap, a timeout) and parsed by a schema. Local specs
+index is fetched like a spec (no redirect, a size cap, a timeout), kept for 10 minutes by a running
+process, and held to the shared rules' limits, since it reaches the agent as text: a site name as
+`safeName` allows, an op signature whose name the rules allow, texts of at most 500 characters, at
+most 50 ops. An entry that breaks them is dropped, not the whole index. Search output always says
+the texts are someone else's. Local specs
 (the user's, pulled and bundled) are merged in as `installed`, so a site learned here and never shared
 is found too, and an index that cannot be fetched leaves those with a `registryError`. A domain or URL
-query matches the entries whose domains hold its registrable domain; words are scored against the
-site's name (most), its title and domains, then its description and ops (names split at camelCase, a
-plural `s` dropped), a word that matches nothing counting against the site; a site under a third of
+query matches the entries whose domains hold its registrable domain; words (lower-cased, under
+3 letters and common words such as "the", "in" or "best" left out, a plural `s` dropped but not from
+"news") are scored against the site's name (most), its title and domains, then its description and
+ops (op names and fields split at camelCase; part of a longer word there counts from 5 letters), a
+word that matches nothing counting against the site; a site under a third of
 the best score matched a stray word and is left out. No ranking by use or health yet.
 
 **Agents pull.** MCP `list_operations` on a site that is not installed pulls it from the registry,
 so an agent with no shell reaches every shared site, and the user never has to know a site's name.
 Pulled this way, the spec's record says `by: "agent"`, and the server neither lists nor runs its
 writes, whatever `--allow-writes` says: page text may have steered the agent to it, so a write waits
-for a human's own `api-anything pull`, which rewrites the record without `by`. Its reads run with
+for an `api-anything pull` from the CLI, which rewrites the record without `by`, in the user's own copy
+too when one shadows the pulled spec (a heal's, or one an `add` extended). The mark binds this server
+only: an agent with a shell can run the CLI itself, as it always could. Its reads run with
 what the user already set up and nothing more: a session exists only if a human logged in to that
 site with the CLI or a login window, and session values stay bound to their hosts. This is the same
 trust as a human's pull, since the registry's specs are reviewed (see Trust model), and the same rules

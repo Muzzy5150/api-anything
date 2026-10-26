@@ -14,7 +14,7 @@ import { call, type NextCall } from "./execute.js";
 import { returnedFields } from "./extract.js";
 import { profileDir } from "./heal.js";
 import { browserSource, cookieNames, importSession, loggedIn, resolveLoginTarget } from "./login.js";
-import { type Pulled, pull, search } from "./registry.js";
+import { type IndexCache, type Pulled, pull, search } from "./registry.js";
 import { loadSession, saveSession, sessionFile, withLock } from "./session.js";
 import { listSites, loadSite, siteNotes } from "./store.js";
 import { SHARED_NOTE } from "./vet.js";
@@ -88,8 +88,24 @@ export function asTable(data: unknown): unknown {
   return JSON.stringify(table).length < sourceSize ? table : data;
 }
 
-/** A site an agent pulled over MCP: its writes stay hidden whatever the server allows (see registry.ts pull). */
-const agentPulled = (site: string) => loadSite(site)?.site.shared?.by === "agent";
+/**
+ * A site an agent pulled over MCP: its writes stay hidden whatever the server allows (see registry.ts pull).
+ * A site that does not load counts as one; call() then says why it does not, in its own fields.
+ */
+const agentPulled = (site: string) => {
+  try {
+    return loadSite(site)?.site.shared?.by === "agent";
+  } catch {
+    return true;
+  }
+};
+const isWrite = (site: string, op: string) => {
+  try {
+    return !!loadSite(site)?.site.operations.some((o) => o.name === op && !o.readOnly);
+  } catch {
+    return false;
+  }
+};
 
 const reply = (v: unknown, isError = false) => ({
   content: [{ type: "text" as const, text: JSON.stringify(v) }],
@@ -118,6 +134,7 @@ const guarded =
   };
 
 export function createServer({ allowWrites = false }: { allowWrites?: boolean } = {}): McpServer {
+  const indexCache: IndexCache = {};
   // without naming the sites up front, an agent asked "what does Goodreads rate X?" reaches for web search
   const server = new McpServer(
     { name: "api-anything", version: VERSION },
@@ -159,7 +176,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     guarded(async ({ query }: { query: string }) => {
-      const r = await search(query);
+      const r = await search(query, { cache: indexCache });
       const top = r.matches[0];
       return reply({
         matches: r.matches.map((m) => ({
@@ -167,7 +184,8 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
           operations: m.operations.filter((o) => !o.write).map((o) => o.op),
         })),
         ...(r.registryError ? { registryError: r.registryError } : {}),
-        ...(r.matches.some((m) => !m.installed) ? { shared: SHARED_NOTE } : {}),
+        // bundled and pulled specs are someone else's too, installed or not
+        ...(r.matches.length ? { shared: SHARED_NOTE } : {}),
         next: top
           ? `list_operations {"site":"${top.site}"}`
           : "nobody shared one yet: a new site is learned with the CLI (api-anything capture, then add), in your shell or by the user",
@@ -280,7 +298,7 @@ export function createServer({ allowWrites = false }: { allowWrites?: boolean } 
       }) => {
         // an agent-pulled site is read-only here, whatever the server allows
         const writes = allowWrites && !agentPulled(site);
-        if (allowWrites && !writes && loadSite(site)?.site.operations.some((o) => o.name === op && !o.readOnly))
+        if (allowWrites && !writes && isWrite(site, op))
           return reply(
             {
               ok: false,

@@ -10,7 +10,7 @@ import { z } from "zod";
 import { returnedFields } from "./extract.js";
 import { dropUnbound, loadSession, safeName, siteOf, writePrivate } from "./session.js";
 import { type Operation, parseSite, type Site } from "./spec.js";
-import { listSites, loadSite, registryDir } from "./store.js";
+import { listSites, loadSite, registryDir, updateSite } from "./store.js";
 import { LIMITS, vetShared } from "./vet.js";
 
 /** The GitHub repository whose `sites/` is the registry. */
@@ -128,6 +128,10 @@ export async function pull(name: string, o: { fetchImpl?: typeof fetch; by?: "ag
   if (notes !== undefined) writePrivate(notesPath, notes);
   else rmSync(notesPath, { force: true });
   writePrivate(path, `${JSON.stringify(site, null, 2)}\n`);
+  // The user's own copy (a heal's, or one an add extended) wins over the pulled one: a human's pull
+  // is the consent that clears the agent's mark there too, or its writes would stay hidden for good.
+  if (!o.by && local?.source === "user" && local.site.shared?.by === "agent")
+    updateSite(name, (s) => ({ ...s!, shared: { from: s!.shared!.from, sha256: s!.shared!.sha256 } }));
 
   return {
     site: name,
@@ -152,22 +156,29 @@ function changes(before: Site, after: Site) {
 
 /* ------------------------------------------------------------------ index and search */
 
+// The index reaches the agent as text, so it is held to the limits the shared rules put on a spec.
+const text = z.string().max(LIMITS.text);
+const HOST = z.string().regex(/^[a-z0-9.-]{1,253}$/);
 const IndexOpSchema = z.object({
-  op: z.string(),
-  method: z.string(),
-  hosts: z.array(z.string()),
+  // a signature: `name(params) -> fields`, whose name the shared rules restrict
+  op: z
+    .string()
+    .max(2000)
+    .regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}\(/),
+  method: z.string().regex(/^[A-Z]{1,10}$/),
+  hosts: z.array(HOST).max(20),
   write: z.literal(true).optional(),
   login: z.literal(true).optional(),
-  description: z.string().optional(),
+  description: text.optional(),
 });
 const IndexEntrySchema = z.object({
-  site: z.string(),
-  displayName: z.string().optional(),
-  description: z.string().optional(),
+  site: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+  displayName: z.string().max(100).optional(),
+  description: text.optional(),
   /** the registrable domains the spec's ops send to or open: what a search by domain or URL matches */
-  domains: z.array(z.string()),
-  sha256: z.string(),
-  operations: z.array(IndexOpSchema),
+  domains: z.array(HOST).max(50),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  operations: z.array(IndexOpSchema).max(LIMITS.operations),
 });
 const IndexSchema = z.object({ generated: z.string(), sites: z.array(IndexEntrySchema) });
 export type IndexEntry = z.infer<typeof IndexEntrySchema>;
@@ -207,24 +218,49 @@ export function buildIndex(dir: string, generated = new Date().toISOString()): R
   return { generated, sites };
 }
 
-export async function fetchIndex(o: { fetchImpl?: typeof fetch } = {}): Promise<RegistryIndex> {
+/** A long-lived caller's (an MCP server's) copy of the index: it searches often, and the index changes on a merge. */
+export type IndexCache = { url?: string; at?: number; index?: RegistryIndex };
+const INDEX_TTL = 10 * 60_000;
+
+/** The index, with each entry that breaks its rules dropped (one bad entry is no reason to lose the rest). */
+export async function fetchIndex(o: { fetchImpl?: typeof fetch; cache?: IndexCache } = {}): Promise<RegistryIndex> {
   const from = indexUrl();
-  const text = await fetchCapped(from, INDEX_CAP, o.fetchImpl ?? fetch);
-  if (text === undefined) throw new Error(`the registry has no index at ${from}`);
+  const c = o.cache;
+  if (c?.index && c.url === from && Date.now() - c.at! < INDEX_TTL) return c.index;
+  const body = await fetchCapped(from, INDEX_CAP, o.fetchImpl ?? fetch);
+  if (body === undefined) throw new Error(`the registry has no index at ${from}`);
+  let raw: { generated: unknown; sites: unknown[] };
   try {
-    return IndexSchema.parse(JSON.parse(text));
+    raw = z.object({ generated: z.string(), sites: z.array(z.unknown()) }).parse(JSON.parse(body));
   } catch (e) {
     throw new Error(`${from}: ${(e as Error).message.split("\n")[0]}`);
   }
+  const sites = raw.sites.flatMap((e) => {
+    const r = IndexEntrySchema.safeParse(e);
+    return r.success ? [r.data] : [];
+  });
+  const index = { generated: raw.generated as string, sites };
+  if (c) Object.assign(c, { url: from, at: Date.now(), index });
+  return index;
 }
 
+// Words that say nothing about which site: a query is often a sentence ("the weather in paris").
+const STOP = new Set(
+  "and are best can cheap find for from get how into list near new now of on one or out per show some than that the their them then this top what when where which who why with you your".split(
+    " ",
+  ),
+);
+
+/** A text's search words: lower-cased, no stopword, none under 3 letters, a plural `s` dropped (not "news"). */
 const words = (text: string) =>
   text
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 1)
-    .map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w));
+    .filter((w) => w.length > 2 && !STOP.has(w))
+    .map((w) => (w.length > 4 && w.endsWith("s") && !/[su]s$/.test(w) ? w.slice(0, -1) : w));
+
+/** An op's signature, its camelCase names split: `searchBooks(q) -> avgRating` reads as search books ... rating. */
+const opWords = (text: string) => words(text.replace(/([a-z])([A-Z])/g, "$1 $2"));
 
 /** A query that names a domain or a URL, as its registrable domain. */
 function domainOf(query: string): string | undefined {
@@ -247,13 +283,17 @@ export function score(e: IndexEntry, query: string): number {
   if (domain) return e.domains.includes(domain) ? 100 : 0;
   const name = words(e.site);
   const title = words(`${e.displayName ?? ""} ${e.domains.join(" ")}`);
-  const about = words([e.description, ...e.operations.flatMap((o) => [o.op, o.description])].filter(Boolean).join(" "));
+  const about = [
+    ...words([e.description, ...e.operations.map((o) => o.description)].filter(Boolean).join(" ")),
+    ...opWords(e.operations.map((o) => o.op).join(" ")),
+  ];
   let total = 0;
   for (const w of new Set(words(query))) {
-    const hit = (list: string[], whole: number, part: number) =>
-      list.includes(w) ? whole : w.length > 2 && list.some((x) => x.includes(w)) ? part : 0;
+    // part of a longer word: "book" in "bookshelf"; in the ops' text only from 5 letters, where "time" is in "datetime"
+    const hit = (list: string[], whole: number, part: number, min = 3) =>
+      list.includes(w) ? whole : w.length >= min && list.some((x) => x.includes(w)) ? part : 0;
     // a word that misses entirely makes the site a worse answer than one that has every word
-    const s = Math.max(hit(name, 10, 6), hit(title, 6, 3), hit(about, 2, 1));
+    const s = Math.max(hit(name, 10, 6), hit(title, 6, 3), hit(about, 2, 1, 5));
     total += s || -1;
   }
   return total;
@@ -287,7 +327,7 @@ export interface Found {
  */
 export async function search(
   query: string,
-  o: { fetchImpl?: typeof fetch; limit?: number; local?: IndexEntry[] } = {},
+  o: { fetchImpl?: typeof fetch; cache?: IndexCache; limit?: number; local?: IndexEntry[] } = {},
 ): Promise<{ matches: Found[]; registryError?: string }> {
   let remote: IndexEntry[] = [];
   let registryError: string | undefined;

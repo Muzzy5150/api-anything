@@ -932,7 +932,7 @@ async function cmdSearch({ pos }: Parsed): Promise<number> {
     query,
     matches: r.matches,
     ...(r.registryError ? { registryError: r.registryError } : {}),
-    ...(r.matches.some((m) => !m.installed) ? { shared: SHARED_NOTE } : {}),
+    ...(r.matches.length ? { shared: SHARED_NOTE } : {}),
     next: !top
       ? "nobody shared one yet: learn it with api-anything capture and add, then share it with api-anything publish"
       : top.installed
