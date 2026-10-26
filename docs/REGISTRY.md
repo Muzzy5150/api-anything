@@ -42,7 +42,9 @@ The answer is `settings.json` `share: true|false` (default yes). No account.
 3. The client proves it before sharing (`learnsite.ts`):
    - the two-run diff and run 2's data (add's existing rules);
    - a holdout call, with args used as neither example, answers with data;
-   - a clean replay: the op called with no cookies and no session values. Ok means it is public.
+   - a clean replay: the op called with no cookies and no session values. Ok means it is public; so does
+     a bot wall answering (Anubis, Cloudflare): the data is public behind it, and each caller's browser
+     tier passes it.
 4. `shareOps` uploads it (`POST /v1/versions`, signed). A public read goes automatically when
    `share` is on. A login op or a write is uploaded only with the user's yes (CLI prompt, or MCP
    elicitation where the client supports it). The published examples are the agent's chosen second
